@@ -1,8 +1,6 @@
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DESCRIPTION:
-
 IF THIS CODE IS USED FOR A RESEARCH PUBLICATION, please cite:
     Yan, W., Melville, J., Yadav, V., Everett, K., Yang, L., Kesler, M. S., ... & Harley, J. B. (2022). A novel physics-regularized interpretable machine learning model for grain growth. Materials & Design, 222, 111032.
 """
@@ -18,9 +16,9 @@ import torch.nn.functional as F
 import imageio
 import matplotlib.pyplot as plt
 from unfoldNd import unfoldNd 
-# from PRIMME import PRIMME
 import matplotlib.colors as mcolors
-from uvw import RectilinearGrid, DataArray
+import time
+# from uvw import RectilinearGrid, DataArray
 
 
 
@@ -28,14 +26,546 @@ from uvw import RectilinearGrid, DataArray
 
 ### Script
 
+unfold_mem_lim = 4e9
+
 fp = './data/'
 if not os.path.exists(fp): os.makedirs(fp)
 
 fp = './plots/'
 if not os.path.exists(fp): os.makedirs(fp)
 
-device=torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device=torch.device("cpu")
 
+
+
+
+
+#### Mode Filter
+
+def count_occurance(arrays):
+    counts = (arrays[:,None,:]==arrays[None,:,:]).sum(0)
+    return counts
+
+
+def count_energy(arrays, miso_matrix, cut):
+    
+    # Cutoff and normalize misorientation matrix (for cubic symetry, cut=63 degrees effectively just normalizes)
+    if cut==0: cut = 1e-10
+    cut_rad = cut/180*np.pi
+    miso_mat_norm = miso_matrix/cut_rad
+    miso_mat_norm[miso_mat_norm>1] = 1
+    
+    #Mark where neighbor IDs do not match
+    diff_matricies = (arrays[:,None,:]!=arrays[None,:,:]).float()
+
+    #Find the indicies of ones
+    i, j, k = torch.where(diff_matricies)
+    
+    #Find the ids of each of those indices
+    i2 = arrays[i,k].long()
+    j2 = arrays[j,k].long()
+    
+    #Find the misorientations of the id pairs
+    f = miso_mat_norm[i2,j2].float()
+    
+    #Place misorientations in place of all the ones
+    diff_matricies[i,j,k] = f
+    
+    #Invert and sum
+    energy = torch.sum(1-diff_matricies, dim=0)
+
+    return energy
+
+
+def find_mode(arrays, miso_matrix, cut):
+    #Takes the mode of the array using torch.Tensor.cuda
+    
+    if cut==0: counts = count_occurance(arrays) #counts the number of occurances for each value
+    else: counts = count_energy(arrays, miso_matrix, cut) #counts the energy value
+    i = torch.argmax(counts, dim=0)[None,] #find the indices of the max
+    mode = torch.gather(arrays, dim=0, index=i)[0] #selects those indices
+    return mode
+
+
+def sample_cumsum(arrays):
+    #"array" - shape=(array elements, number of arrays)
+    #Chooses an index from each column in "array" by sampling from it's cumsum
+    arrays_cumsum = torch.cumsum(arrays.T, dim=1)/torch.sum(arrays, dim=0)[:,None]
+    sample_values = torch.rand(arrays_cumsum.shape[0]).to(arrays.device)
+    sample_indices = torch.argmax((arrays_cumsum>sample_values.unsqueeze(1)).float(), dim=1)
+    return sample_indices
+
+
+def sample_counts(arrays, miso_matrix, cut):
+    if cut==0: counts = count_occurance(arrays) #counts the number of occurances for each value
+    else: counts = count_energy(arrays, miso_matrix, cut) #counts the energy value
+    index = sample_cumsum(counts)[None,] #use this if you want to sample from the counts instead of choosing the max
+    return torch.gather(arrays, dim=0, index=index)[0] #selects those indices
+
+
+def normal_mode_filter(im, miso_matrix=None, cut=0, cov=25, num_samples=64, bcs='p', memory_limit=1e9):
+    
+    # Find constants
+    s = list(im.shape) #images shape
+    d = len(s) #number of dimensions
+    e = np.prod(s)
+    
+    # Create covariance matrix
+    if type(cov)==int: cov=torch.eye(d)*cov
+    
+    # Set boundary conditions [x,y,z]
+    if type(bcs)==str: bcs=[bcs]*d
+    
+    # Create sampler
+    cov = cov.to(im.device)
+    mean_arr = torch.zeros(d).to(im.device)
+    mvn = torch.distributions.MultivariateNormal(mean_arr, cov)
+    
+    # Calculate the index coords
+    ii = [torch.arange(ss).to(im.device) for ss in s]
+    coords = torch.cartesian_prod(*ii).float().transpose(0,1).reshape(1, d, -1)
+    
+    # Calculate neighborhood modes by batch
+    mem_total = 2*num_samples*d*num_samples*e*(64/8)
+    num_batches = mem_total/memory_limit
+    batch_size = int(e/num_batches)
+    l = []
+    coords_split = torch.split(coords, batch_size, dim=2)
+    for c in coords_split:
+        
+        # Sample neighborhoods
+        samples = mvn.sample((num_samples, c.shape[2])).int().transpose(1,2) #sample separately for each site
+        # samples = torch.cat([samples, samples*-1], dim=0).to(im.device) #mirror the samples to keep a zero mean
+        c = samples + c
+        
+        # Set bounds for the indices 
+        for i in range(d): #remember - periodic x values, makes the y axis periodic, or the y-z plane periodic
+            if bcs[i]=='p': c[:,i,:] = c[:,i,:]%s[i] #wrap (periodic)
+            else: c[:,i,:] = torch.clamp(c[:,i,:], min=0, max=s[i]-1) #or clamp
+        
+        #Gather the coord values and take the mode for each pixel (replace this with the matrix approach)   
+        ii = [c[:,i,:].long() for i in range(d)]
+        im_sampled = im[ii]
+        im_next_part = find_mode(im_sampled, miso_matrix, cut)
+        l.append(im_next_part)
+        
+    im_next = torch.hstack(l).reshape(s)
+    
+    return im_next
+
+
+def run_mf(ic, ea, nsteps, cut, cov=25, num_samples=64, miso_array=None, if_plot=False, if_save=True, if_time=False, bcs='p', memory_limit=1e9, device=device):
+    #run mode filter simulation
+    
+    # Setup
+    im = torch.Tensor(ic).float().to(device)
+    ngrain = len(torch.unique(im))
+    tmp = np.array([8,16,32], dtype='uint64')
+    dtype = 'uint' + str(tmp[np.sum(ngrain>2**tmp)])
+    
+    # if cut==0:
+    #     miso_matrix = None
+    # else:
+    if miso_array is None: 
+        miso_array = torch.Tensor(find_misorientation(ea, mem_max=1))
+    else:
+        miso_array = torch.Tensor(miso_array)
+        
+    miso_matrix = miso_array_to_matrix(miso_array[None,]).to(device)[0]
+    
+    if type(cov)==int: cov_rep = cov
+    else: cov_rep = cov[0,0]
+    sz_str = ''.join(['%dx'%i for i in ic.shape])[:-1]
+    fp_save = './data/mf_sz(%s)_ng(%d)_nsteps(%d)_cov(%d)_numnei(%d)_cut(%d).h5'%(sz_str, ngrain, nsteps, cov_rep, num_samples, cut)
+    
+    # Run simulation
+    log_t = []
+    log = [im.clone()]
+    for i in tqdm(range(nsteps), 'Running MF simulation'): 
+        if if_time: start_time = time.time()
+        im = normal_mode_filter(im, miso_matrix, cut, cov, num_samples, bcs, memory_limit=memory_limit)
+        if if_time: log_t.append(time.time() - start_time)
+        log.append(im.clone())
+        if if_plot: plt.imshow(im[0,0,].cpu()); plt.show()
+    
+    if if_time: runtime = np.sum(log_t)
+    ims_id = torch.stack(log)[:,None,].cpu().numpy()
+    
+    # Save Simulation
+    if if_save:
+        with h5py.File(fp_save, 'a') as f:
+            
+            # If file already exists, create another group in the file for this simulaiton
+            num_groups = len(f.keys())
+            hp_save = 'sim%d'%num_groups
+            g = f.create_group(hp_save)
+            
+            # Save data
+            dset = g.create_dataset("ims_id", shape=ims_id.shape, dtype=dtype)
+            dset[:] = ims_id
+            
+            # if cut>0: 
+            dset2 = g.create_dataset("euler_angles", shape=ea.shape)
+            dset3 = g.create_dataset("miso_array", shape=miso_array.shape)
+            dset4 = g.create_dataset("miso_matrix", shape=miso_matrix.shape)
+            dset2[:] = ea
+            dset3[:] = miso_array #radians (does not save the exact "Miso.txt" file values, which are degrees divided by the cutoff angle)
+            dset4[:] = miso_matrix.cpu() #same values as mis0_array, different format
+        return ims_id, fp_save
+    if if_time: return ims_id, runtime
+    return ims_id
+
+
+def image_covariance_matrix(im, min_max=[-200, 200], num_samples=8, bounds=['wrap','wrap']):
+    #Sample and calculate the index coords
+    mvn = torch.distributions.Uniform(torch.Tensor([min_max[0]]).to(im.device), torch.Tensor([min_max[1]]).to(im.device))
+    samples = mvn.sample((num_samples, 2, im.numel()))[...,0].int()
+    
+    arr0 = torch.arange(im.shape[0]).to(im.device)
+    arr1 = torch.arange(im.shape[1]).to(im.device)
+    coords = torch.cartesian_prod(arr0, arr1).float().transpose(0,1).reshape(1, 2, -1)
+    coords = samples+coords
+    
+    #Set bounds for the indices
+    if bounds[1]=='wrap': coords[:,0,:] = coords[:,0,:]%im.shape[0]
+    else: coords[:,0,:] = torch.clamp(coords[:,0,:], min=0, max=im.shape[0]-1)
+    if bounds[0]=='wrap': coords[:,1,:] = coords[:,1,:]%im.shape[1]
+    else: coords[:,1,:] = torch.clamp(coords[:,1,:], min=0, max=im.shape[1]-1)
+    
+    #Flatten indices
+    index = (coords[:,1,:]+im.shape[1]*coords[:,0,:]).long()
+        
+    # #Gather the coord values and take the mode for each pixel      
+    # im_expand = im.reshape(-1,1).expand(-1, im.numel())
+    # v = torch.gather(im_expand, dim=0, index=index)
+    # im_next = torch.mode(v.cpu(), dim=0).values.reshape(im.shape)
+    # im_next = im_next.to(device)
+    # # im_next = fs.rand_mode(v).reshape(im.shape)
+    
+    #Find the covariance matrix of just the samples that equal the mode of the samples
+    index_mode = im.reshape(-1)[index]==im.reshape(-1)
+    samples_mode = samples.transpose(1,2)[index_mode].transpose(1,0).cpu().numpy()
+    # plt.plot(samples_mode[0,:1000], samples_mode[1,:1000], '.'); plt.show()
+    
+    return np.cov(samples_mode)
+
+
+def find_sample_coords(im, cov=torch.Tensor([[25,0],[0,25]]), num_samples=64, bcs=['p','p']):
+    
+    #Create sampler
+    cov = cov.to(im.device)
+    mean_arr = torch.zeros(2).to(im.device)
+    mvn = torch.distributions.MultivariateNormal(mean_arr, cov)
+    
+    #Calculate the index coords
+    arr0 = torch.arange(im.shape[0]).to(im.device)
+    arr1 = torch.arange(im.shape[1]).to(im.device)
+    coords = torch.cartesian_prod(arr0, arr1).float().transpose(0,1).reshape(1, 2, -1)
+    
+    samples = mvn.sample((num_samples, coords.shape[2])).int().transpose(1,2) #sample separately for each site
+    samples = torch.cat([samples, samples*-1], dim=0).to(im.device) #mirror the samples to keep a zero mean
+    c = samples + coords #shifted samples
+    
+    #Set bounds for the indices (wrap or clamp - add a reflect)
+    if bcs[1]=='p': c[:,0,:] = c[:,0,:]%im.shape[0] #periodic or wrap
+    else: c[:,0,:] = torch.clamp(c[:,0,:], min=0, max=im.shape[0]-1)
+    if bcs[0]=='p': c[:,1,:] = c[:,1,:]%im.shape[1] #periodic or wrap
+    else: c[:,1,:] = torch.clamp(c[:,1,:], min=0, max=im.shape[1]-1)
+    
+    #Flatten indices
+    index = (c[:,1,:]+im.shape[1]*c[:,0,:]).long()
+    
+    return coords, samples, index
+
+
+def find_pf_matrix(id_ratios):
+    #finds pair-factor (pf) matrix
+    #pf matrix relates ID pair-factors to ID probability of adoption using ID ratios
+    
+    #Find reference indicies to create the matrix
+    num_ids = len(id_ratios)
+    num_pf = int(num_ids*(num_ids-1)/2) #number of pair-factors (combinations of IDs)
+    i, j = torch.where(torch.triu(torch.ones(num_ids, num_ids), 1))
+    k = torch.arange(num_pf)
+    
+    #Place ID ratios in matrix
+    A = torch.zeros(num_ids, num_pf)
+    A[i,k] = id_ratios[j]
+    A[j,k] = id_ratios[i]
+    
+    # #Convert from argmin (energy) to argmax (probability)
+    # h = torch.arange(num_ids)
+    # Ap = (id_ratios[i]+id_ratios[j])[None,].repeat(num_ids, 1)
+    # Ap[h[:,None]==i[None,]] = id_ratios[i]
+    # Ap[h[:,None]==j[None,]] = id_ratios[j]
+    
+    #Create B matrix (for normalization)
+    B = (id_ratios[i] + id_ratios[j]) / (len(id_ratios)-1)
+    
+    #Record order of pair-factor location indices
+    pf_loc = torch.stack([i,j])
+    
+    return A, B, pf_loc
+
+
+# def find_radial_max(rs, c, v):
+#     vt = v-c #transform to new center
+#     rt = rs-c #transform to new center
+#     dot = (vt*rt).sum(0)
+#     mag_mult = torch.sqrt((rt**2).sum(0))*torch.sqrt((vt**2).sum(0))
+#     tmp = dot/mag_mult
+#     tmp[tmp>1]=1; tmp[tmp<-1]=-1
+#     angles = torch.acos(tmp)/np.pi*180
+    
+#     i_max = torch.argmax(angles) #location of the ratio with the largest angles
+#     a_max = angles[i_max] #largest angle
+    
+#     # a_min = 60
+#     # #If a_max is less than a_min, then the center is outside the triangle
+#     # if a_max<a_min:
+#     #     return np.nan, np.nan #needs to be solved later
+    
+#     #Convert rt_max to a unit vector from c, then add c to return to original space
+#     rt_max = rt[:,i_max] #ratios with largest angle
+#     rt_max_unit = rt_max/torch.sqrt(torch.matmul(rt_max, rt_max.T))
+#     r_max_unit = rt_max_unit + c[:,0]
+    
+#     return r_max_unit, a_max
+
+
+# def estimate_angles(ratios, outcomes):
+#     #"ratios" - torch.Tensor, shape=(number of grains, number of neighborhoods), ratios found in each neighborhood
+#     #"outcomes" - torch.Tensor, shape=(number of grains, number of neighborhoods), which ratio was chosen to flip to
+    
+#     d = ratios.shape[0]
+#     ij = torch.combinations(torch.arange(d), r=2)
+#     e = (torch.ones(d)/d)[:,None] #intersecting point when all factors are equal
+#     e = e/torch.norm(e)
+    
+#     midpoints = []
+#     angles = []
+#     for i, j in ij: #for each grain ID pair
+    
+#         #New center
+#         c = torch.zeros(d)[:,None] 
+#         c[i] = 0.5
+#         c[j] = 0.5
+        
+#         #Find max angle from grain IDs i to j
+#         v = torch.zeros(d)[:,None]; v[i] = 1 #find angle from this vector
+#         rs = ratios[:,outcomes[i]==1] #for these ratios
+#         rmi, ami = find_radial_max(rs, c, v) #angle max from i
+#         # rmi = (v-c)*np.cos(ami/180*np.pi) + (e-c)*np.sin(ami/180*np.pi) + c
+        
+#         #Find max angle from grain j to i
+#         v = torch.zeros(d)[:,None]; v[j] = 1 #find angle from this vector
+#         rs = ratios[:,outcomes[j]==1] #for these ratios
+#         rmj, amj = find_radial_max(rs, c, v) #angle max from j
+#         # rmj = (v-c)*np.cos(amj/180*np.pi) + (e-c)*np.sin(amj/180*np.pi) + c
+        
+#         #Find a point in the dividing line
+#         midpoints.append((rmi+rmj)/2)
+        
+#         #Average angles
+#         angles.append((ami+180-amj)/2)
+        
+#     #Convert to Tensors
+#     angles = torch.stack(angles)[:,None]
+#     midpoints = torch.stack(midpoints)
+    
+#     if ratios.shape[0]==3:
+#         #Replace invalid midpoints
+#         is_valid = is_valid_3grains(ratios, outcomes)
+#         midpoints = replace_invalid_3grain(midpoints, is_valid, ij)
+#     else:
+#         is_valid = torch.ones(midpoints.shape[0])==1
+    
+#     return angles, midpoints, ij, is_valid
+
+
+# def is_valid_3grains(ratios, outcomes):
+#     #If the center of is outside the triangle, return the invalid edge
+#     #"ratios" are the neighborhood ratios for each grain - shape=(3,number of neighborhoods)
+#     #"outcomes" are the grain chosen (lowest energy) - shape=(number of neighborhoods, 3)
+#     #Currently only works for three grain systems
+#     ii = (ratios>0.5).sum(0)==1 #for all ratios with one greater than 0.5
+#     nn = ((ratios[:,ii]>0.5)<outcomes[:,ii]).sum(1) #number of each grain in restricted a region
+#     is_valid = nn.flip((0))==0 #where 0->[01], 1->[02], 2->[12]
+#     return is_valid
+
+
+# def replace_invalid_3grain(midpoints, i_valid, ij):
+#     #"midpoints" - shape=(number of points or ID pairs, number of dimensions)
+#     #"i_valid" - shape=(number of points or ID pairs)
+#     #"ij" - shape=(number of points or ID pairs, 2)
+#     i, j = ij[i_valid,:][0,]
+#     p00 = torch.zeros(d) 
+#     p00[i] = 0.5
+#     p00[j] = 0.5
+    
+#     p01 = midpoints[i_valid,][0,]
+    
+#     i, j = ij[i_valid,:][1,]
+#     p10 = torch.zeros(d)
+#     p10[i] = 0.5
+#     p10[j] = 0.5
+    
+#     p11 = midpoints[i_valid,][1,]
+    
+#     tmp = point_line_intercept(p00,p01,p10,p11)
+    
+#     midpoints[i_valid==False] = tmp
+
+#     return midpoints
+
+
+# def affine_projection(r, d0=0, d1=1):
+#     d = r.shape[0]
+    
+#     n = torch.ones(d,1)
+    
+#     tmp = torch.linalg.inv(torch.matmul(n.T,n))
+#     P = torch.matmul(n*tmp,n.T)
+    
+#     Q = torch.eye(d) - P
+    
+#     t = torch.zeros(d,1)
+#     t[0] = 1
+    
+#     q0 = torch.cat([torch.cat([torch.eye(d), t], dim=1), torch.cat([torch.zeros(1,d), torch.ones(1,1)], dim=1)])
+#     q1 = torch.cat([torch.cat([Q, torch.zeros(d,1)], dim=1), torch.cat([torch.zeros(1,d), torch.ones(1,1)], dim=1)])
+#     q2 = torch.cat([torch.cat([torch.eye(d), -t], dim=1), torch.cat([torch.zeros(1,d), torch.ones(1,1)], dim=1)])
+#     QQ = torch.matmul(torch.matmul(q0,q1),q2)
+    
+#     t0 = torch.zeros(d+1); t0[d0]=-1; t0[d1]=1
+#     t1 = torch.ones(d+1); t1[d]=0; t1[d0]=0; t1[d1]=0
+#     T = torch.stack([t0,t1])
+    
+#     TQ = torch.matmul(T,QQ)
+    
+#     rhat = torch.matmul(TQ,torch.cat([r,torch.ones(1,r.shape[1])]))
+#     return rhat
+
+
+# def point_vector_angle(c, p0, p1):
+#     #all inputs are torch.Tensor
+#     #"c" is center point - shape=(number of dimenisons)
+#     #"p0" is the point in the direction of zero degrees - shape=(number of dimenisons)
+#     #"p1" are the points to find an angle to - shape=(number of dimenisons, number of points)
+#     #outputs the angle between the vectors in degrees
+#     if len(p1.shape)<2: p1 = p1[:,None]
+#     v0 = (p0-c)
+#     v1 = p1-c[:,None]
+#     tmp = torch.linalg.multi_dot([v0,v1])/(torch.norm(v0)*torch.norm(v1,dim=0))
+#     return torch.acos(tmp)/np.pi*180
+
+
+# def point_line_intercept(p00,p01,p10,p11):
+#     #finds the intercept between the line p00 to p01 and the line p10 to p11
+#     #all inputs are torch.Tensor - shape=(number of dimensions)
+#     #can only find one intercept right now
+#     b = (p00-p10)[:,None]
+#     A = torch.stack([p01-p00, p10-p11]).T
+#     A_inv = torch.linalg.pinv(A)
+#     s = torch.matmul(A_inv,b)[0]
+#     return (p00-p01)*s+p00
+
+
+# def find_intersect_lines(midpoints):
+#     #'midpoints' - list of poin on the line seperating the cooresponding ID pairs indicated in 'ij'
+#     #'intersections' - a matrix of lines that divide the ID pairs indicated in 'ij'
+#     #Works for arbitrarily large grain systems (may not be true actually, sometimes it's weird with more than three grains)
+#     #Can be optimized somewhat by only generating the two rows needed from 'find_pf_matrix'
+    
+#     d = midpoints.shape[1]
+#     ij = torch.combinations(torch.arange(d), r=2)
+    
+#     l = []
+#     for k, (i, j) in enumerate(ij):
+#         A, _, _ = find_pf_matrix(midpoints[k]) #find the system of equations for this ratio set
+#         tmp = A[j,:]-A[i,:] #find the difference of the rows indicated in 'ij'
+#         l.append(tmp)
+#     intersections = torch.stack(l)
+    
+#     return intersections
+    
+    
+# def find_pair_factor_ratios(intersections):
+#     #Sets the first pair factor to one and solves for the rest
+#     #The exact pair factors are not neccesarily found, but the ratios between them are the same
+    
+#     b = -intersections[:,0]
+#     A = intersections[:,1:]
+#     x_partial = torch.matmul(torch.linalg.pinv(A),b)
+    
+#     x = torch.ones(intersections.shape[0])
+#     x[1:] = x_partial
+    
+#     return x
+
+
+# def plot_ratios(rr, p, i=0, j=1):
+#     #'rr' - sets of ratios, torch.Tensor, shape=(num_IDs, num neighborhood)
+#     #'p' - ID labels for each ratio, torch.Tensor, num neighborhood
+#     #'i' and 'j' are the IDs of the projection plane when more than three IDs
+    
+#     if rr.shape[0]==3:
+#         i = p[0]==1
+#         j = p[1]==1
+#         k = p[2]==1
+#         i0, j0, k0 = rr[:,i]
+#         i1, j1, k1 = rr[:,j]
+#         i2, j2, k2 = rr[:,k]
+        
+#         ax = plt.axes(projection='3d')
+#         ax.scatter3D(i0, j0, k0, depthshade=0, cmap='Blues')
+#         ax.scatter3D(i1, j1, k1, depthshade=0, cmap='Oranges')
+#         ax.scatter3D(i2, j2, k2, depthshade=0, cmap='Greens')
+#         ax.set_xlim([1,0])
+#         ax.set_ylim([0,1])
+#         ax.set_zlim([1,0])
+#         ax.set_xlabel('r0')
+#         ax.set_ylabel('r1')
+#         ax.set_zlabel('r2')
+#     else:
+#         x, y = affine_projection(rr, i, j)
+#         for i in [i,j]:#range(p.shape[1]):
+#             ii = p[i]==1
+#             plt.scatter(x[ii], y[ii])
+#             plt.xlim([-1,1])
+#             plt.ylim([0,1])
+         
+
+# def find_avg_intersect(midpoints, is_valid):
+#     #Find thes intercepts between the lines defined by 'midpoints', ignoring points that are not 'is_valid'
+#     #'midpoints' - torch.Tensor, shape=(num points, num IDs)
+#     #'is_valid' - torch.Tensor, shape=(num points), which points are valid
+
+#     d = midpoints.shape[1]
+#     ij = torch.combinations(torch.arange(d), r=2)
+#     ij = ij[is_valid]
+#     midpoints = midpoints[is_valid]
+    
+#     #Find new origins for each ID pair
+#     l = []
+#     for i,j in ij:
+#         tmp = torch.zeros(d) 
+#         tmp[i] = 0.5
+#         tmp[j] = 0.5
+#         l.append(tmp)
+#     origins = torch.stack(l)
+    
+#     #Find intercepts for each line pair
+#     hk = torch.combinations(torch.arange(ij.shape[0]), r=2)
+#     l = []
+#     for h,k in hk:
+#         l.append(point_line_intercept(origins[h], midpoints[h], origins[k], midpoints[k]))
+    
+#     #Take average
+#     avg_intercept = sum(l)/len(l)
+    
+#     return avg_intercept
 
 
 
@@ -69,6 +599,153 @@ def check_exist_h5(hps, gps, dts, if_bool=False):
                     else: raise Exception('Dataset does not exist: %s/%s/%s'%(hps[i], gps[i], d))
                     
     if if_bool: return True
+
+
+def my_batch(data, func, batch_sz=100):
+    #'data' is broken into a list of "batch_sz" data along dim=0
+    #"func" is then applied along dim=1 and concatenated back together
+    data_split = data.split(batch_sz, dim=0)
+    data_list = [func(d, dim=1) for d in data_split]
+    return torch.cat(data_list)  
+    
+    
+def batch_where(data, batch_sz=100):
+    #'data' is broken into a list of "batch_sz" data along dim=0
+    #"func" is then applied along dim=1 and concatenated back together
+    data_split = data.split(batch_sz, dim=0)
+    data_list = [torch.where(d) for d in data_split]
+    data_list2 = [torch.stack((i+k*batch_sz,j)) for k, (i, j) in enumerate(data_list)]
+    return torch.cat(data_list2, 1)
+
+
+def wrap_slice(data, slices_txt):
+    #Slices 'data' using 'slices_txt' (i.e. data[slices_txt])
+    #Except - Slices can wrap around boundaries using this function
+    #Note - 'data' can be an h5 dataset link
+    
+    # Setup
+    sz = np.array(data.shape)
+    
+    # Parse 'slices_txt' 
+    dims_remove = []
+    slices = slices_txt.replace(' ','').split(',')
+    for i, s in enumerate(slices): 
+        if ':' not in s: #if only int given, keep as is, but keep the dimension until the end
+            plus_one = int(s)+1
+            if plus_one==0: slices[i] = [s+':'] 
+            else: slices[i] = [s+':'+str(plus_one)] 
+            dims_remove.append(i)
+        else:
+            ss = s.split(':')
+            for j in range(2): 
+                if ss[j]!='': ss[j] = int(ss[j])%sz[i] #wrap all indices
+            if '' not in ss and ss[0]>=ss[1]:
+                slices[i] = [str(ss[0])+':', ':'+str(ss[1])] #split indices when wraping
+            else:
+                slices[i] = [str(ss[0])+':'+str(ss[1])] #don't split when not wrapping
+    
+    # Find number of ranges needed for each dimension
+    num_iter = torch.Tensor([len(e) for e in slices]).long() 
+
+    # Create a nested list to hold blocks of data
+    log = []
+    for t in num_iter.flip(0): log = [log for _ in range(t)]
+    log = eval(str(log)) #ensure all the lists are unique objects
+    
+    # Extract, nest, and then block the data
+    i = torch.stack(torch.meshgrid([torch.arange(e) for e in num_iter])).reshape(len(num_iter), -1).T
+    for j in i: 
+        list_index = ''.join(['[%d]'%jj for jj in j])
+        slices_select = tuple([slices[k][j[k]] for k in range(len(slices))])
+        slices_select = ''.join(['%s,',]*len(slices))[:-1]%slices_select
+        
+        if type(data)==torch.Tensor:
+            exec('log%s = data[%s].cpu().numpy()'%(list_index, slices_select))
+        else:
+            exec('log%s = data[%s]'%(list_index, slices_select))
+      
+    tmp = np.block(log).squeeze(tuple(dims_remove))
+    if type(data)==torch.Tensor: 
+        return torch.Tensor(tmp).to(data.device)
+    else:
+        return tmp
+
+
+def shape_indices(i, sz):
+    #'i' can be used to index the flattened Tensor 
+    #'i_shaped' can index the same values in the same Tensor of shape 'sz'
+    i_shaped = []
+    for s in sz.flip(0): 
+        i_shaped.append((i%s).long())
+        # i = torch.floor_divide(i,s)
+        i = torch.div(i, s, rounding_mode='floor')
+    i_shaped.reverse()
+    return i_shaped
+
+
+def flatten_indices(indices, sz):
+    #'indices' can index the same values in the same Tensor of shape 'sz'
+    #'index' can be used to index the flattened Tensor 
+    index = indices[-1].long()
+    for i in range(1, len(indices)):
+        index += (indices[-i-1]*torch.prod(sz[-i:])).long()
+    return index
+
+
+def periodic_pad_1d(im, dim, p):
+    #Pads 'im' along 'dim' with an int 'p' of padding on both sides
+    
+    if p==0: return im
+    
+    num_dim = im.dim()
+    
+    b = dim #number of empty slices before the dimension
+    a = num_dim - dim - 1 #number of empty slices after the dimension
+    
+    im_padded = F.pad(im, [0,0]*a+[p,p])
+    im_padded[(slice(None),)*b + (slice(None,p),) + (slice(None),)*a] = im[(slice(None),)*b + (slice(-p,None),) + (slice(None),)*a]
+    im_padded[(slice(None),)*b + (slice(-p,None),) + (slice(None),)*a] = im[(slice(None),)*b + (slice(None,p),) + (slice(None),)*a] 
+    
+    return im_padded
+
+
+def unfold_in_batches(im, batch_sz, kernel_sz, stride, pad_mode='circular', if_shuffle=False):
+    #Create an unfolded view of 'im' (torch.Tensor)
+    #Given 'kernel_sz' (tuple) and 'stride' (tuple)
+    #Yield 'batch_sz' (int) portions of the view at a time
+    #Shuffles output if 'if_shuffle', then yields each kernal once each
+    
+    im_padded = im.clone()
+    for i in range(len(kernel_sz)):
+        p = int(kernel_sz[i]/stride[i]/2)
+        im_padded = periodic_pad_1d(im_padded, i, p)
+        
+    
+    # # Delete later, doesn't work for 3D #!!!
+    # #Pad the image
+    # tmp = torch.Tensor(kernel_sz)/torch.Tensor(stride)/2
+    # pad = tuple(np.flip(tmp.repeat_interleave(2).int().numpy())) #calculate padding needed based on kernel_size
+    # if pad_mode!=None: im_padded = pad_mixed(im[None,None], pad, pad_mode)[0,0,] #pad "ims" to maintain dimensions after unfolding
+    
+
+    #Variables
+    dm = im_padded.dim()
+    sz = tuple(im_padded.size())
+    sz_new = torch.Tensor(sz)-(torch.Tensor(kernel_sz)-1)
+    num_kernels = int(torch.prod(sz_new))
+    
+    #Unfold as a view
+    im_unfolded = im_padded.unfold(0,kernel_sz[0],stride[0])
+    for i in range(dm-1): im_unfolded = im_unfolded.unfold(i+1,kernel_sz[i+1],stride[i+1])
+    
+    #Split and return unfold in batches
+    if if_shuffle is True: i = torch.randperm(num_kernels)
+    else: i = torch.arange(num_kernels)
+    i_split = torch.split(i,batch_sz)
+    
+    for j in i_split:
+        indices = shape_indices(j, sz_new)
+        yield im_unfolded[indices].float()
 
 
 
@@ -189,7 +866,7 @@ def voronoi2image(size=[128, 64, 32], ngrain=512, memory_limit=1e9, p=2, center_
     num_batches = torch.ceil(batch_memory/available_memory).int()
     num_dim_batch = torch.ceil(num_batches**(1/dim)).int() #how many batches per dimension
     dim_batch_size = torch.ceil(torch.Tensor(size)/num_dim_batch).int() #what's the size of each of the batches (per dimension)
-    num_dim_batch = torch.ceil(torch.Tensor(size)/dim_batch_size).int() #the actual number of batches per dimension (needed because of rouning error)
+    num_dim_batch = torch.ceil(torch.Tensor(size)/dim_batch_size).int() #the actual number of batches per dimension (needed because of rounding error)
     
     if available_memory>0: #if there is avaiable memory
         #CALCULATE THE ID IMAGE
@@ -356,7 +1033,7 @@ def calc_MisoEnergy(fp=r"../SPPARKS/examples/agg/2d_sim/"):
     with open(fp + "MisoEnergy.txt", 'w') as file: file.writelines(tmp)
 
 
-def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, miso_array=None, which_sim='agg', bcs=['p','p','p'], save_sim=True, del_sim=False, path_sim=None):
+def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, miso_array=None, which_sim='eng', num_processors=1, bcs=['p','p','p'], save_sim=True, del_sim=False, path_sim=None):
     '''
     Runs one simulation and returns the file path where the simulation was run
     
@@ -368,11 +1045,12 @@ def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, m
         dims: square dimension of the structure
         ngrain: number of grains
         which_sim ('agg' or 'eng'): dictates which simulator to use where eng is the latest and allows the use of multiple cores 
+        num_processors: does not affect agg, agg can only do 1
     Output:
         path_sim
     '''
     
-    # Find a simulation path that doesn't already exist (if not told exactly where to run the simulation)
+    # Find a simulation path that doesn't already exist (or if not told exactly where to run the simulation)
     if path_sim==None:
         for i in range(100): #assume I will not do more than 100 simulations at a time
             path_sim = r"./spparks_simulation_%d/"%i
@@ -390,7 +1068,6 @@ def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, m
     dim = np.sum(np.array(size)!=1) #the number of dimensions larger than 1
     if dim==2: bcs[-1] = 'p' #if 2D, ensure last boundary condition is periodic
     ngrain = len(np.unique(ic))
-    num_processors = 1 #does not affect agg, agg can only do 1
     if rseed==None: rseed = np.random.randint(10000) #changes get different growth from the same initial condition
     freq_stat = freq[0]
     freq_dump = freq[1]
@@ -431,10 +1108,11 @@ def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, m
     os.chdir(path_sim)
     os.system('chmod +x agg.sh')
     os.system('chmod +x eng.sh')
-    os.system('./agg.sh')
     if which_sim=='eng': 
         calc_MisoEnergy(r"./")
         os.system('./eng.sh')
+    else: 
+        os.system('./agg.sh')
     os.chdir(path_home)
     print("\nSIMULATION COMPLETE \nSIMULATION PATH: %s\n"%path_sim)
     
@@ -445,8 +1123,9 @@ def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, m
         miso_matrix = miso_array_to_matrix(torch.from_numpy(miso_array[None,]))[0].numpy()
         
         # Read dump
-        fp_save = './data/spparks_sz(%dx%d)_ng(%d)_nsteps(%d)_freq(%d)_kt(%.2f)_cut(%d).h5'%(np.ceil(size[0]),np.ceil(size[1]),ngrain,nsteps,freq[1],kt,cut)
-        ims_id, _, ims_energy = process_dump('%s/spparks.dump'%path_sim)
+        size = ic.shape
+        sz_str = ''.join(['%dx'%i for i in size])[:-1]
+        fp_save = './data/spparks_sz(%s)_ng(%d)_nsteps(%d)_freq(%.1f)_kt(%.2f)_cut(%d).h5'%(sz_str,ngrain,nsteps,freq[1],kt,cut)
         tmp = np.array([8,16,32], dtype='uint64')
         dtype = 'uint' + str(tmp[np.sum(ngrain>2**tmp)])
         
@@ -458,22 +1137,76 @@ def run_spparks(ic, ea, nsteps=500, kt=0.66, cut=25.0, freq=(1,1), rseed=None, m
             g = f.create_group(hp_save)
             
             # Save data
-            dset = g.create_dataset("ims_id", shape=ims_id.shape, dtype=dtype)
-            dset1 = g.create_dataset("ims_energy", shape=ims_energy.shape)
+            nsteps_tot = int(nsteps/freq_dump)
+            dset = g.create_dataset("ims_id", shape=(nsteps_tot+1, 1,)+size, dtype=dtype)
+            dset1 = g.create_dataset("ims_energy", shape=(nsteps_tot+1, 1,)+size)
             dset2 = g.create_dataset("euler_angles", shape=ea.shape)
             dset3 = g.create_dataset("miso_array", shape=miso_array.shape)
             dset4 = g.create_dataset("miso_matrix", shape=miso_matrix.shape)
-            dset[:] = ims_id
-            dset1[:] = ims_energy
             dset2[:] = ea
             dset3[:] = miso_array #radians (does not save the exact "Miso.txt" file values, which are degrees divided by the cutoff angle)
             dset4[:] = miso_matrix #same values as mis0_array, different format
             
-        return ims_id, fp_save
+            item_itr = process_dump_item('%s/spparks.dump'%path_sim)
+            for i, (im_id, _, im_energy) in enumerate(tqdm(item_itr, 'Reading dump', total=nsteps_tot+1)):
+                dset[i,0] = im_id
+                dset1[i,0] = im_energy
+            
+        return fp_save
     
     if del_sim: os.system(r"rm -r %s"%path_sim) #remove entire folder
     
-    return None, None
+    return None
+
+
+def read_dump_item(path_to_dump):
+    #Can't seek through file reliably, item IDs different length and inconsistent
+    
+    with open(path_to_dump) as file: 
+        
+        line = file.readline()
+        item = line[6:].replace('\n', '')
+        log = []
+        # for line in file.readlines():
+        while line != '':
+            line = file.readline()
+            if 'ITEM:' in line or line=='':
+                data = np.stack(log)
+                yield item, data
+                item = line[6:].replace('\n', '')
+                log = []
+            else:
+                data_line = np.array(line.split()).astype(float)
+                log.append(data_line)
+            
+            
+def process_dump_item(path_to_dump):
+    for i, (item, data) in enumerate(read_dump_item(path_to_dump)): 
+    
+        # if 'TIMESTEP' in item: print('\rReading step: %f'%data[0,-1], end="\r")
+        if 'BOX BOUNDS' in item: dims = np.ceil(data[:,-1]).astype(int) #z,y,x
+        if 'ATOMS id type d1 d2 d3 energy' in item:
+            
+            if i==3: #first pass through atoms
+                # Find indicies to sort data by "ATOMS: id", which is not linear when running on multiple cores
+                i_sort = np.argsort(data[:,0]) #find the sort indices for the first step (assume each step is the same order)
+                
+                # Find euler angles
+                num_grains = int(np.max(data[:,1]))
+                euler_angles = np.zeros([num_grains,3])
+                j = data[:,1].astype(int)-1 #subtract 1 so min ID is 0 and not 1
+                euler_angles[j,:] = data[:,2:-1]
+            
+            # Sort data
+            data = data[i_sort,:]
+            
+            # Arrange ID images
+            im_id = data[:,1].reshape(tuple(np.flip(dims))).transpose([2,1,0]).squeeze()-1 #subtract 1 so min ID is 0 and not 1
+            
+            # Arrange energy images
+            im_energy = data[...,-1].reshape(tuple(np.flip(dims))).transpose([2,1,0]).squeeze()
+            
+            yield im_id, euler_angles, im_energy
 
 
 def read_dump(path_to_dump='./spparks_simulations/spparks.dump'):
@@ -530,6 +1263,10 @@ def process_dump(path_to_dump='./spparks_simulations/spparks.dump'):
     # Read dump
     item_names, item_data = read_dump(path_to_dump)
     
+    # Sort by "ATOMS id", which are not linear when running on multiple cores
+    i = np.argsort(item_data[3][0,:,0]) #find the sort indices for the first step (assume each step is the same order)
+    item_data[3] = item_data[3][:,i,:]
+    
     # Find simulation dimensions
     dims = np.flip(np.ceil(item_data[2][0,:,-1]).astype(int))
     
@@ -550,13 +1287,15 @@ def process_dump(path_to_dump='./spparks_simulations/spparks.dump'):
     return ims_id, euler_angles, ims_energy
 
 
-def create_SPPARKS_dataset(size=[257,257], ngrains_rng=[256, 256], kt=0.66, cutoff=25.0, nsets=200, max_steps=100, offset_steps=1, future_steps=4, del_sim=False):
-    
+def create_SPPARKS_dataset(size=[257,257], ngrains_rng=[256, 256], kt=0.66, cutoff=25.0, nsets=200, max_steps=100, offset_steps=1, future_steps=4, freq = (1,1), del_sim=False):
+    #'freq' - [how often to report stats on the simulation, how often to dump an image or record]
+            
     # SET SIMULATION PATH
     path_sim = './spparks_simulation_trainset/'
         
     # NAMING CONVENTION   
-    fp = './data/trainset_spparks_sz(%dx%d)_ng(%d-%d)_nsets(%d)_future(%d)_max(%d)_kt(%.2f)_cut(%d).h5'%(size[0],size[1],ngrains_rng[0],ngrains_rng[1],nsets,future_steps,max_steps,kt,cutoff)
+    sz_str = ''.join(['%dx'%i for i in size])[:-1]
+    fp = './data/trainset_spparks_sz(%s)_ng(%d-%d)_nsets(%d)_future(%d)_max(%d)_kt(%.2f)_freq(%.1f)_cut(%d).h5'%(sz_str,ngrains_rng[0],ngrains_rng[1],nsets,future_steps,max_steps,kt,freq[0],cutoff)
 
     # DETERMINE THE SMALLEST POSSIBLE DATA TYPE POSSIBLE
     m = np.max(ngrains_rng)
@@ -577,13 +1316,12 @@ def create_SPPARKS_dataset(size=[257,257], ngrains_rng=[256, 256], kt=0.66, cuto
             # SET PARAMETERS
             ngrains = np.random.randint(ngrains_rng[0], ngrains_rng[1]+1) #number of grains
             nsteps = np.random.randint(offset_steps+future_steps, max_steps+1) #SPPARKS steps to run
-            freq = (1,1) #how often to report stats on the simulation, how often to dump an image (record)
             rseed = np.random.randint(10000) #change to get different growth from teh same initial condition
             
             # RUN SIMULATION
             im, ea, _ = voronoi2image(size, ngrains) #generate initial condition
             miso_array = find_misorientation(ea, mem_max=1) 
-            run_spparks(im, ea, nsteps, kt, cutoff, freq, rseed, miso_array=miso_array, save_sim=False, del_sim=False, path_sim=path_sim)
+            run_spparks(im, ea, nsteps, kt, cutoff, freq, rseed, miso_array=miso_array, save_sim=False, del_sim=del_sim, path_sim=path_sim, num_processors=32)
             grain_ID_images, grain_euler_angles, ims_energy = process_dump('%s/spparks.dump'%path_sim)
             # miso = np.loadtxt('%s/Miso.txt'%path_sim)*cutoff/180*np.pi #convert to radians
             
@@ -591,7 +1329,55 @@ def create_SPPARKS_dataset(size=[257,257], ngrains_rng=[256, 256], kt=0.66, cuto
             dset[i,] = grain_ID_images[-(future_steps+1):,] 
             dset1[i,] = ims_energy[-(future_steps+1):,] 
             dset2[i,:ngrains,] = grain_euler_angles
-            dset3[i:int(ngrains*(ngrains-1)/2),] = miso_array
+            dset3[i,:int(ngrains*(ngrains-1)/2),] = miso_array
+            
+    if del_sim: os.system(r"rm -r %s"%path_sim) #remove entire folder
+    
+    return fp
+
+
+def create_SPPARKS_dataset_circles(size=[512,512], radius_rng=[64,200], kt=0.66, cutoff=0.0, nsets=200, max_steps=10, offset_steps=1, future_steps=4, freq = (1,1), del_sim=False):
+    #'freq' - [how often to report stats on the simulation, how often to dump an image or record]
+            
+    # SET SIMULATION PATH
+    path_sim = './spparks_simulation_trainset/'
+        
+    # NAMING CONVENTION   
+    sz_str = ''.join(['%dx'%i for i in size])[:-1]
+    fp = './data/trainset_spparks_sz(%s)_r(%d-%d)_nsets(%d)_future(%d)_max(%d)_kt(%.2f)_freq(%.1f)_cut(%d).h5'%(sz_str,radius_rng[0],radius_rng[1],nsets,future_steps,max_steps,kt,freq[0],cutoff)
+
+    # DETERMINE THE SMALLEST POSSIBLE DATA TYPE POSSIBLE
+    m = 2 #number of grains
+    dtype = 'uint8'
+    
+    h5_shape = (nsets, future_steps+1, 1) + tuple(size)
+    h5_shape2 = (nsets, m, 3)
+    h5_shape3 = (nsets, int(m*(m-1)/2))
+
+    with h5py.File(fp, 'w') as f:
+        dset = f.create_dataset("ims_id", shape=h5_shape, dtype=dtype)
+        dset1 = f.create_dataset("ims_energy", shape=h5_shape)
+        dset2 = f.create_dataset("euler_angles", shape=h5_shape2)
+        dset3 = f.create_dataset("miso_array", shape=h5_shape3)
+        for i in tqdm(range(nsets)):
+            
+            # SET PARAMETERS
+            r = np.random.randint(radius_rng[0], radius_rng[1]+1) #number of grains
+            nsteps = np.random.randint(offset_steps+future_steps, max_steps+1) #SPPARKS steps to run
+            rseed = np.random.randint(10000) #change to get different growth from teh same initial condition
+            
+            # RUN SIMULATION
+            im, ea = generate_circleIC(size, r)
+            miso_array = find_misorientation(ea, mem_max=1) 
+            run_spparks(im, ea, nsteps, kt, cutoff, freq, rseed, miso_array=miso_array, save_sim=False, del_sim=del_sim, path_sim=path_sim, num_processors=32)
+            grain_ID_images, grain_euler_angles, ims_energy = process_dump('%s/spparks.dump'%path_sim)
+            # miso = np.loadtxt('%s/Miso.txt'%path_sim)*cutoff/180*np.pi #convert to radians
+            
+            # WRITE TO FILE
+            dset[i,] = grain_ID_images[-(future_steps+1):,] 
+            dset1[i,] = ims_energy[-(future_steps+1):,] 
+            dset2[i,:] = grain_euler_angles
+            dset3[i,:,] = miso_array
             
     if del_sim: os.system(r"rm -r %s"%path_sim) #remove entire folder
     
@@ -645,6 +1431,62 @@ def extract_spparks_logfile_energy(logfile_path="32c20000grs2400stskT050_cut25.l
                 energy[i-start_point] = float(line.split()[5])
             
     return energy
+
+
+def num_features(ims, window_size=17, pad_mode='circular'):
+    edges = num_diff_neighbors(ims, window_size, pad_mode)
+    edges_flat = edges.reshape([ims.shape[0], -1])
+    return torch.sum(edges_flat!=0, dim=1)
+
+
+def trainset_calcNumFeatures(fp, window_size, if_plot=False):
+    g = 'num_features_%d'%window_size
+    
+    if_exist = check_exist_h5([fp], [g], [], if_bool=True)
+    
+    with h5py.File(fp, 'a') as f:
+        
+        if not if_exist: 
+            
+            ni = f['ims_id'].shape[0]
+            log = []
+            for i in tqdm(range(ni), 'Calculating number of features for training:'):
+                im = torch.from_numpy(f['ims_id'][i,0][None].astype(int)).to(device)
+                nf = num_features(im, window_size, pad_mode='circular')
+                log.append(nf)
+            nf = torch.cat(log).cpu().numpy()
+            
+            f[g] = nf
+        else:
+            nf = f[g][:]
+    
+    if if_plot:
+        cs = np.cumsum(nf)
+        plt.figure()
+        plt.plot(cs)
+        plt.title('Cumulative number of features')
+        plt.xlabel('Number of sets')
+        plt.ylabel('Number of features')
+        plt.show()
+    
+    return nf
+
+
+def trainset_cutNumFeatures(fp, window_size, cut_f):
+
+    nf = trainset_calcNumFeatures(fp, window_size)
+    cs = np.cumsum(nf)
+    i = np.argmin((np.abs(cs-cut_f)).astype(int))+1
+    
+    tmp0 = fp.split('nsets(')[0]
+    tmp1 = fp.split(')_future')[1]
+    fp_new = tmp0+'nsets(%d_%df)_future'%(i,cs[i-1])+tmp1
+    
+    with h5py.File(fp, 'r') as f:
+        with h5py.File(fp_new, 'w') as fn:
+            fn['ims_id'] = f['ims_id'][:i]
+            fn['euler_angles'] = f['euler_angles'][:]
+            fn['miso_array'] = f['miso_array'][:]
             
 
 
@@ -896,12 +1738,12 @@ def plotly_micro(im):
     fig.show()
 
 
-def create_3D_paraview_vtr(ims, fp='micro_grid.vtr'):
-    #ims.shape = (d1, d2, d3), numpy
-    cells_coords = [np.arange(s+1)-int(s/2) for s in ims.shape]
-    grid = RectilinearGrid(fp, cells_coords, compression=True)
-    grid.addCellData(DataArray(ims, range(3), 'grains'))
-    grid.write()
+# def create_3D_paraview_vtr(ims, fp='micro_grid.vtr'):
+#     #ims.shape = (d1, d2, d3), numpy
+#     cells_coords = [np.arange(s+1)-int(s/2) for s in ims.shape]
+#     grid = RectilinearGrid(fp, cells_coords, compression=True)
+#     grid.addCellData(DataArray(ims, range(3), 'grains'))
+#     grid.write()
     
 
 def find_frame_num_grains(h5_group, num_grains=7500, min_pix=50):
@@ -1099,17 +1941,41 @@ def neighborhood_miso(ims, miso_matrices, window_size=3, pad_mode='circular'):
     # window_size - the patch around each pixel that constitutes its neighbors
     # May need to add memory management through batches for large tensors in the future
     
+    
+    #NEW #!!!
     if type(window_size)==int: window_size = [window_size] #convert to "list" if "int" is given
     
-    ims_unfold = my_unfoldNd(ims, kernel_size=window_size, pad_mode=pad_mode)
-    # miso_matrices = miso_array_to_matrix(miso_arrays) #indicies to convert miso array to matrix
-    # del miso_arrays
-    ims_unfold_miso = gid_to_miso(ims_unfold, miso_matrices)
-    del miso_matrices
+    d = ims.dim()-2
+    kernel_sz = window_size*d
+    stride = (1,)*d
     
+    batch_sz = int(unfold_mem_lim/(torch.prod(torch.Tensor(kernel_sz))*64))
+    unfold_gen = unfold_in_batches(ims[0,0], batch_sz, kernel_sz, stride, pad_mode)
+      
+    log = []
+    for batch in unfold_gen:
+        im_unfold = batch.reshape(batch.shape[0],-1).T[None,]
+        im_unfold_miso = gid_to_miso(im_unfold, miso_matrices)
+        log.append(torch.sum(im_unfold_miso, axis=1)[0])
+        
     if pad_mode==None: s = ims.shape[:2]+tuple(np.array(ims.shape[2:])-window_size+1)
     else: s = ims.shape
-    ims_miso = torch.sum(ims_unfold_miso, axis=1).reshape(s) #misorientation image
+    ims_miso = torch.cat(log).reshape(s) #misorientation image
+    
+    
+    # if type(window_size)==int: window_size = [window_size] #convert to "list" if "int" is given
+    
+    # ims_unfold = my_unfoldNd(ims, kernel_size=window_size, pad_mode=pad_mode)
+    # # miso_matrices = miso_array_to_matrix(miso_arrays) #indicies to convert miso array to matrix
+    # # del miso_arrays
+    # ims_unfold_miso = gid_to_miso(ims_unfold, miso_matrices)
+    # del miso_matrices
+    
+    # if pad_mode==None: s = ims.shape[:2]+tuple(np.array(ims.shape[2:])-window_size+1)
+    # else: s = ims.shape
+    # ims_miso = torch.sum(ims_unfold_miso, axis=1).reshape(s) #misorientation image
+    
+    
     return ims_miso #reshape to orignal image shape
 
 
@@ -1122,22 +1988,39 @@ def neighborhood_miso_spparks(ims, miso_matrices, cut=25, window_size=3, pad_mod
     
     if type(window_size)==int: window_size = [window_size] #convert to "list" if "int" is given
     
-    ims_unfold = my_unfoldNd(ims, kernel_size=window_size, pad_mode=pad_mode)
-    # miso_matrices = miso_array_to_matrix(miso_arrays) #indicies to convert miso array to matrix
-    # del miso_arrays
-    ims_unfold_miso = gid_to_miso(ims_unfold, miso_matrices)
-    del miso_matrices
-    
     if pad_mode==None: s = ims.shape[:2]+tuple(np.array(ims.shape[2:])-window_size+1)
     else: s = ims.shape
     
-    ims_unfold_miso = ims_unfold_miso/np.pi*180 #convert to degrees
-    r = ims_unfold_miso/cut
-    tmp = r*(1-torch.log(r))
-    tmp[torch.isnan(tmp)] = 0
-    tmp[ims_unfold_miso>cut] = 1
+    d = ims.dim()-2
+    mem = window_size[0]**d*64
+    mem_lim = 1e9
+    batch_sz = int(mem_lim/mem)
+    kernel_sz = tuple(window_size*d)
+    stride = (1,)*d
     
-    ims_miso = torch.sum(tmp, axis=1).reshape(s) #misorientation image
+    unfold_gen = unfold_in_batches(ims[0,0], batch_sz, kernel_sz, stride)
+    
+    log = []
+    for ims_unfold in unfold_gen:
+        ims_unfold = ims_unfold.reshape(ims_unfold.shape[0], -1).transpose(0,1)[None,]
+        ims_unfold_miso = gid_to_miso(ims_unfold, miso_matrices)
+        ims_unfold_miso = ims_unfold_miso/np.pi*180 #convert to degrees
+        r = ims_unfold_miso/cut
+        tmp = r*(1-torch.log(r))
+        tmp[torch.isnan(tmp)] = 0
+        tmp[ims_unfold_miso>cut] = 1
+        ims_miso_part = tmp.sum(0).sum(0)
+        log.append(ims_miso_part)
+    ims_miso = torch.cat(log).reshape(s)
+    
+    # ims_unfold = my_unfoldNd(ims, kernel_size=window_size, pad_mode=pad_mode)
+    # ims_unfold_miso = gid_to_miso(ims_unfold, miso_matrices)
+    # ims_unfold_miso = ims_unfold_miso/np.pi*180 #convert to degrees
+    # r = ims_unfold_miso/cut
+    # tmp = r*(1-torch.log(r))
+    # tmp[torch.isnan(tmp)] = 0
+    # tmp[ims_unfold_miso>cut] = 1
+    # ims_miso = torch.sum(tmp, axis=1).reshape(s) #misorientation image
     
     return ims_miso #reshape to orignal image shape
 
@@ -1173,8 +2056,8 @@ def compute_grain_stats(hps, gps='last', device=device):
         if type(gps)!=list: gps = [gps]
     
     #Make sure the files needed actually exist
-    dts = ['ims_id', 'euler_angles', 'miso_matrix']
-    check_exist_h5(hps, gps, dts, if_bool=False)
+    # dts = ['ims_id', 'euler_angles', 'miso_matrix']
+    # check_exist_h5(hps, gps, dts, if_bool=False)
     
     for i in range(len(hps)):
         hp = hps[i]
@@ -1186,7 +2069,7 @@ def compute_grain_stats(hps, gps='last', device=device):
             # Setup
             g = f[gp]
             d = g['ims_id']
-            max_id = g['euler_angles'].shape[0] - 1
+            max_id = np.max(d) - np.min(d)
             miso_matrix = torch.from_numpy(g['miso_matrix'][:]).to(device)
             
             # Find number of pixels per grain
@@ -1309,28 +2192,35 @@ def make_videos(hps, gps='last'):
         if type(gps)!=list: gps = [gps]
     
     # Make sure all needed datasets exist
-    dts=['ims_id', 'ims_miso', 'ims_miso_spparks']
-    check_exist_h5(hps, gps, dts)  
+    # dts=['ims_id', 'ims_miso', 'ims_miso_spparks'] #!!!
+    # check_exist_h5(hps, gps, dts)  #!!!
     
     for i in tqdm(range(len(hps)), "Making videos"):
         with h5py.File(hps[i], 'a') as f:
             
             g = f[gps[i]]
             
-            ims = g['ims_id'][:,0]
+            # If 3D, split down the middle of the first axis
+            sz = g['ims_id'].shape[2:]
+            dim = len(sz)
+            mid = int(sz[0]/2)
+            if dim==2: j = np.arange(sz[0])
+            elif dim==3: j = mid
+            
+            ims = g['ims_id'][:,0,j]
             ims = (255/np.max(ims)*ims).astype(np.uint8)
             imageio.mimsave('./plots/ims_id%d.mp4'%(i), ims)
-            imageio.mimsave('./plots/ims_id%d.gif'%(i), ims)
+            # imageio.mimsave('./plots/ims_id%d.gif'%(i), ims)
             
-            ims = g['ims_miso'][:,0]
-            ims = (255/np.max(ims)*ims).astype(np.uint8)
-            imageio.mimsave('./plots/ims_miso%d.mp4'%(i), ims)
-            imageio.mimsave('./plots/ims_miso%d.gif'%(i), ims)
+            # ims = g['ims_miso'][:,0,j]
+            # ims = (255/np.max(ims)*ims).astype(np.uint8)
+            # imageio.mimsave('./plots/ims_miso%d.mp4'%(i), ims)
+            # imageio.mimsave('./plots/ims_miso%d.gif'%(i), ims)
             
-            ims = g['ims_miso_spparks'][:,0]
-            ims = (255/np.max(ims)*ims).astype(np.uint8)
-            imageio.mimsave('./plots/ims_miso_spparks%d.mp4'%(i), ims)
-            imageio.mimsave('./plots/ims_miso_spparks%d.gif'%(i), ims)
+            # ims = g['ims_miso_spparks'][:,0,j]
+            # ims = (255/np.max(ims)*ims).astype(np.uint8)
+            # imageio.mimsave('./plots/ims_miso_spparks%d.mp4'%(i), ims)
+            # imageio.mimsave('./plots/ims_miso_spparks%d.gif'%(i), ims)
 
         
 def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=True, if_show=True):
@@ -1357,8 +2247,8 @@ def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=T
         c = tmp
     
     # Make sure all needed datasets exist
-    dts=['grain_areas', 'grain_sides', 'ims_miso', 'ims_miso_spparks']
-    check_exist_h5(hps, gps, dts)  
+    # dts=['grain_areas', 'grain_sides', 'ims_miso', 'ims_miso_spparks']
+    # check_exist_h5(hps, gps, dts)  
     
     # Calculate scale limit
     with h5py.File(hps[0], 'r') as f:
@@ -1367,7 +2257,13 @@ def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=T
         ngrains = g['grain_areas'].shape[1]
         lim = total_area/(ngrains*scale_ngrains_ratio)
     
-    # Plot average grain area through time and find linear slopes
+    #Find number of dimensions
+    d = []
+    for i in range(len(hps)): 
+        with h5py.File(hps[i], 'r') as f:
+            d.append(len(f[gps[i]]['ims_id'].shape)-2)
+    
+    # Plot average grain radius squared through time and find linear slopes
     log = []
     ys = []
     ps = []
@@ -1375,17 +2271,24 @@ def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=T
     for i in tqdm(range(len(hps)),'Calculating avg grain areas'):
         
         with h5py.File(hps[i], 'r') as f: 
-            grain_areas_avg = f[gps[i]+'/grain_areas_avg'][:]
-        log.append(grain_areas_avg)
+            grain_areas = f[gps[i]+'/grain_areas'][:]
         
-        x = np.arange(len(grain_areas_avg))
-        p = np.polyfit(x, grain_areas_avg, 1)
+        if d[i]==3: #if 3D volume, spherical
+            grain_radii = np.cbrt(grain_areas/np.pi*3/4)
+        else: #if 2D area, circle
+            grain_radii = np.sqrt(grain_areas/np.pi)
+        grain_radii_avg = grain_radii.sum(1)/(grain_radii!=0).sum(1) #find mean without zeros
+        r_avg2 = grain_radii_avg**2 #square after the mean
+        log.append(r_avg2)
+        
+        x = np.arange(len(r_avg2))
+        p = np.polyfit(x, r_avg2, 1)
         ps.append(p)
         
         fit_line = np.sum(np.array([p[j]*x*(len(p)-j-1) for j in range(len(p))]), axis=0)
         ys.append(fit_line)
         
-        r = np.corrcoef(grain_areas_avg, fit_line)[0,1]**2
+        r = np.corrcoef(r_avg2, fit_line)[0,1]**2
         rs.append(r)
     
     plt.figure()
@@ -1400,25 +2303,25 @@ def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=T
     plt.savefig('./plots/avg_grain_area_time', dpi=300)
     if if_show: plt.show()
 
-    # Plot scaled average grain area through time and find linear slopes
+    # Plot scaled average grain radius squared through time and find linear slopes
     ys = []
     ps = []
     rs = []
     si = []
     xs = []
     for i in range(len(hps)):
-        grain_areas_avg = log[i]
-        ii = len(grain_areas_avg) - 1 - np.argmin(np.flip(np.abs(grain_areas_avg-lim)))
+        r_avg2 = log[i]
+        ii = len(r_avg2) - 1 - np.argmin(np.flip(np.abs(r_avg2-lim)))
         si.append(ii)
         
-        x = np.arange(len(grain_areas_avg))
-        p = np.polyfit(x, grain_areas_avg, 1)
+        x = np.arange(len(r_avg2))
+        p = np.polyfit(x, r_avg2, 1)
         ps.append(p)
         
         fit_line = np.sum(np.array([p[j]*x*(len(p)-j-1) for j in range(len(p))]), axis=0)
         ys.append(fit_line)
         
-        r = np.corrcoef(grain_areas_avg, fit_line)[0,1]**2
+        r = np.corrcoef(r_avg2, fit_line)[0,1]**2
         rs.append(r)
         
         xx = np.linspace(ngrains,int(ngrains*scale_ngrains_ratio),ii)
@@ -1478,12 +2381,17 @@ def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=T
             grain_areas = f[gps[i]+'/grain_areas'][:]
         tg = (grain_areas.shape[1])*frac
         ng = (grain_areas!=0).sum(1)
-        i = (ng<tg).argmax()
-        ga = grain_areas[i]
-        gr = np.sqrt(ga/np.pi)
-        bins=np.linspace(0,3,10)
+        j = (ng<tg).argmax()
+        ga = grain_areas[j]
+        
+        if d[i]==3: #if 3D volume, spherical
+            gr = np.cbrt(ga/np.pi*3/4)
+        else: #if 2D area, circle
+            gr = np.sqrt(ga/np.pi)
+        
+        bins=np.linspace(0,3,20)
         gr_dist, _ = np.histogram(gr[gr!=0]/gr[gr!=0].mean(), bins)
-        plt.plot(bins[:-1], gr_dist/gr_dist.sum()/bins[1])
+        plt.plot(bins[1:]-0.5*(bins[1]-bins[0]), gr_dist/gr_dist.sum()/bins[1])
     plt.title('Normalized radius distribution (%d%% grains remaining)'%(100*frac))
     plt.xlabel('R/<R>')
     plt.ylabel('Frequency')
@@ -1500,396 +2408,194 @@ def make_time_plots(hps, gps='last', scale_ngrains_ratio=0.05, cr=None, legend=T
             grain_sides = f[gps[i]+'/grain_sides'][:]
         tg = (grain_areas.shape[1])*frac
         ng = (grain_areas!=0).sum(1)
-        i = (ng<tg).argmax()
-        gs = grain_sides[i]
-        bins=np.linspace(0,3,10)
-        gs_dist, _ = np.histogram(gs[gs!=0]/np.mean(gs[gs!=0]), bins)
-        plt.plot(bins[1:]-0.5, gs_dist/gs_dist.sum())
-    plt.title('Normalized number of sides distribution (%d%% grains remaining)'%(100*frac))
-    plt.xlabel('S/<S>')
+        j = (ng<tg).argmax()
+        gs = grain_sides[j]
+        
+        if i==0: #set histogram limits base on first set
+            low = np.min(gs[gs!=0])-1
+            high = np.max(gs[gs!=0])+1
+            if high>30: high=30
+        
+        bins=np.arange(low,high+2)-0.5
+        gs_dist, _ = np.histogram(gs[gs!=0], bins)
+        plt.plot(bins[1:]-0.5, gs_dist)
+        
+    plt.title('Number of sides distribution (%d%% grains remaining)'%(100*frac))
+    plt.xlabel('Number of sides')
     plt.ylabel('Frequency')
     if legend==True: plt.legend(legend)
-    plt.savefig('./plots/normalized_number_sides_distribution', dpi=300)
+    plt.savefig('./plots/number_sides_distribution', dpi=300)
     if if_show: plt.show()
         
-    # Plot average misorientation per bounday pixel
-    log = []
-    for i in tqdm(range(len(hps)),'Plotting average miso'):
-        with h5py.File(hps[i], 'r') as f: 
-            ims_miso_avg = f[gps[i]+'/ims_miso_avg'][:]
-        log.append(ims_miso_avg)
+    # # Plot average misorientation per bounday pixel
+    # log = []
+    # for i in tqdm(range(len(hps)),'Plotting average miso'):
+    #     with h5py.File(hps[i], 'r') as f: 
+    #         ims_miso_avg = f[gps[i]+'/ims_miso_avg'][:]
+    #     log.append(ims_miso_avg)
     
-    plt.figure()
-    legend = []
-    for i in range(len(hps)):
-        plt.plot(log[i], c=c[i%len(c)])
-        legend.append('')
-    plt.title('Average miso per boundary pixel')
-    plt.xlabel('Number of frames')
-    plt.ylabel('Average miso per boundary pixel')
-    if legend==True: plt.legend(legend)
-    plt.savefig('./plots/avg_miso_time', dpi=300)
-    if if_show: plt.show()
+    # plt.figure()
+    # legend = []
+    # for i in range(len(hps)):
+    #     plt.plot(log[i], c=c[i%len(c)])
+    #     legend.append('')
+    # plt.title('Average miso per boundary pixel')
+    # plt.xlabel('Number of frames')
+    # plt.ylabel('Average miso per boundary pixel')
+    # if legend==True: plt.legend(legend)
+    # plt.savefig('./plots/avg_miso_time', dpi=300)
+    # if if_show: plt.show()
     
-    # Plot scaled average misorientation per bounday pixel
-    plt.figure()
-    legend = []
-    for i in range(len(hps)):
-        plt.plot(xs[i], log[i][:len(xs[i])], c=c[i%len(c)])
-        plt.xlim([np.max(xs[i]), np.min(xs[i])])
-        legend.append('')
-    plt.title('Average miso per boundary pixel (scaled)')
-    plt.xlabel('Number of grains')
-    plt.ylabel('Average miso per boundary pixel')
-    if legend==True: plt.legend(legend)
-    plt.savefig('./plots/avg_miso_time_scaled', dpi=300)
-    if if_show: plt.show()
+    # # Plot scaled average misorientation per bounday pixel
+    # plt.figure()
+    # legend = []
+    # for i in range(len(hps)):
+    #     plt.plot(xs[i], log[i][:len(xs[i])], c=c[i%len(c)])
+    #     plt.xlim([np.max(xs[i]), np.min(xs[i])])
+    #     legend.append('')
+    # plt.title('Average miso per boundary pixel (scaled)')
+    # plt.xlabel('Number of grains')
+    # plt.ylabel('Average miso per boundary pixel')
+    # if legend==True: plt.legend(legend)
+    # plt.savefig('./plots/avg_miso_time_scaled', dpi=300)
+    # if if_show: plt.show()
     
-    # Plot average misorientation per bounday pixel (SPPARKS)
-    log = []
-    for i in tqdm(range(len(hps)),'Plotting average spparks miso'):
-        with h5py.File(hps[i], 'r') as f: 
-            ims_miso_spparks_avg = f[gps[i]+'/ims_miso_spparks_avg'][:]
-        log.append(ims_miso_spparks_avg)
+    # # Plot average misorientation per bounday pixel (SPPARKS)
+    # log = []
+    # for i in tqdm(range(len(hps)),'Plotting average spparks miso'):
+    #     with h5py.File(hps[i], 'r') as f: 
+    #         ims_miso_spparks_avg = f[gps[i]+'/ims_miso_spparks_avg'][:]
+    #     log.append(ims_miso_spparks_avg)
     
-    plt.figure()
-    legend = []
-    for i in range(len(hps)):
-        plt.plot(log[i], c=c[i%len(c)])
-        legend.append('')
-    plt.title('Average miso per boundary pixel (SPPARKS)')
-    plt.xlabel('Number of frames')
-    plt.ylabel('Average miso per boundary pixel')
-    if legend==True: plt.legend(legend)
-    plt.savefig('./plots/avg_miso_spparks_time', dpi=300)
-    if if_show: plt.show()
+    # plt.figure()
+    # legend = []
+    # for i in range(len(hps)):
+    #     plt.plot(log[i], c=c[i%len(c)])
+    #     legend.append('')
+    # plt.title('Average miso per boundary pixel (SPPARKS)')
+    # plt.xlabel('Number of frames')
+    # plt.ylabel('Average miso per boundary pixel')
+    # if legend==True: plt.legend(legend)
+    # plt.savefig('./plots/avg_miso_spparks_time', dpi=300)
+    # if if_show: plt.show()
     
-    # Plot scaled average misorientation per bounday pixel (SPPARKS)
-    plt.figure()
-    legend = []
-    for i in range(len(hps)):
-        plt.plot(xs[i], log[i][:len(xs[i])], c=c[i%len(c)])
-        plt.xlim([np.max(xs[i]), np.min(xs[i])])
-        legend.append('')
-    plt.title('Average miso per boundary pixel (SPPARKS, scaled)')
-    plt.xlabel('Number of grains')
-    plt.ylabel('Average miso per boundary pixel')
-    if legend==True: plt.legend(legend)
-    plt.savefig('./plots/avg_miso_spparks_time_scaled', dpi=300)
-    if if_show: plt.show()
+    # # Plot scaled average misorientation per bounday pixel (SPPARKS)
+    # plt.figure()
+    # legend = []
+    # for i in range(len(hps)):
+    #     plt.plot(xs[i], log[i][:len(xs[i])], c=c[i%len(c)])
+    #     plt.xlim([np.max(xs[i]), np.min(xs[i])])
+    #     legend.append('')
+    # plt.title('Average miso per boundary pixel (SPPARKS, scaled)')
+    # plt.xlabel('Number of grains')
+    # plt.ylabel('Average miso per boundary pixel')
+    # if legend==True: plt.legend(legend)
+    # plt.savefig('./plots/avg_miso_spparks_time_scaled', dpi=300)
+    # if if_show: plt.show()
     
-    # Plot dihedral angle distribution standard deviation over time
-    log = []
-    for i in tqdm(range(len(hps)),'Plotting dihedral angle STD'):
-        with h5py.File(hps[i], 'r') as f: 
-            dihedral_std = f[gps[i]+'/dihedral_std'][:]
-        log.append(dihedral_std)
+    # # Plot dihedral angle distribution standard deviation over time
+    # log = []
+    # for i in tqdm(range(len(hps)),'Plotting dihedral angle STD'):
+    #     with h5py.File(hps[i], 'r') as f: 
+    #         dihedral_std = f[gps[i]+'/dihedral_std'][:]
+    #     log.append(dihedral_std)
     
-    plt.figure()
-    legend = []
-    for i in range(len(hps)):
-        plt.plot(log[i], c=c[i%len(c)])
-        legend.append('')
-    plt.title('Dihedral angle distribution STD')
-    plt.xlabel('Number of frames')
-    plt.ylabel('STD (degrees)')
-    if legend==True: plt.legend(legend)
-    plt.savefig('./plots/dihedral_std', dpi=300)
-    if if_show: plt.show()
+    # plt.figure()
+    # legend = []
+    # for i in range(len(hps)):
+    #     plt.plot(log[i], c=c[i%len(c)])
+    #     legend.append('')
+    # plt.title('Dihedral angle distribution STD')
+    # plt.xlabel('Number of frames')
+    # plt.ylabel('STD (degrees)')
+    # if legend==True: plt.legend(legend)
+    # plt.savefig('./plots/dihedral_std', dpi=300)
+    # if if_show: plt.show()
     
-    # Plot scaled dihedral angle distribution standard deviation over time
-    plt.figure()
-    legend = []
-    for i in range(len(hps)):
-        plt.plot(xs[i], log[i][:len(xs[i])], c=c[i%len(c)])
-        plt.xlim([np.max(xs[i]), np.min(xs[i])])
-        legend.append('')
-    plt.title('Dihedral angle distribution STD (scaled)')
-    plt.xlabel('Number of grains')
-    plt.ylabel('STD (degrees)')
-    if legend==True: plt.legend(legend)
-    plt.savefig('./plots/dihedral_std_scaled', dpi=300)
-    if if_show: plt.show()
+    # # Plot scaled dihedral angle distribution standard deviation over time
+    # plt.figure()
+    # legend = []
+    # for i in range(len(hps)):
+    #     plt.plot(xs[i], log[i][:len(xs[i])], c=c[i%len(c)])
+    #     plt.xlim([np.max(xs[i]), np.min(xs[i])])
+    #     legend.append('')
+    # plt.title('Dihedral angle distribution STD (scaled)')
+    # plt.xlabel('Number of grains')
+    # plt.ylabel('STD (degrees)')
+    # if legend==True: plt.legend(legend)
+    # plt.savefig('./plots/dihedral_std_scaled', dpi=300)
+    # if if_show: plt.show()
+    
+    # #vizualize the relationship between area change and number of sides
+    # i=1
+    # with h5py.File(hps[i], 'r') as f: 
+    #     grain_areas = f[gps[i]+'/grain_areas'][:]
+    #     grain_sides = f[gps[i]+'/grain_sides'][:]
+    # grain_areas = grain_areas.astype(float)
+    # grain_areas[grain_areas==0] = np.nan
+    
+    # for k in range(1001):
+    #     a0 = grain_areas[:,k]
+    #     a1 = grain_sides[:,k]
+    #     b1 = a1>=6
+        
+    #     i = np.where(b1)[0]
+    #     j = np.where(~b1)[0]
+        
+    #     plt.plot(i,a0[i],'tab:blue')
+    #     plt.plot(j,a0[j],'tab:orange')
+    
+    # plt.legend(['>6 sides','<6 sides'])
+    # plt.ylim([0,10000])
+    # plt.title('Area and number of sides through time')
+    # plt.xlabel('Frame')
+    # plt.ylabel('Number of pixels')
     
     print(si)
     if not if_show: plt.close('all')
-
-
-
-
-
-### Inclination code from Lin
-
-# Basic function in Smooth Algorithm
-def output_linear_smoothing_matrix(iteration):
-# =============================================================================
-#     The function will output the bottom matrix,
-#     the matrix can be use to calculate smoothing status.
-#     bottom matrix length is 2*iteration+1
-# =============================================================================
-
-    matrix_length = 2*iteration+3
-    matrix = np.zeros((iteration, matrix_length, matrix_length))
-    matrix_unit = np.array([[1/16, 1/8, 1/16], [1/8, 1/4, 1/8], [1/16, 1/8, 1/16]])
-    matrix[iteration-1,iteration:iteration+3,iteration:iteration+3] = matrix_unit
-
-    for i in range(iteration-2,-1,-1):
-        for j in range(i+1, matrix_length-i-1):
-            for k in range(i+1, matrix_length-i-1):
-                matrix[i,j,k] += np.sum(matrix[i+1,j-1:j+2,k-1:k+2] * matrix_unit)
-
-
-
-    return matrix[0,1:-1,1:-1]
-
-
-def output_linear_smoothing_matrix3D(iteration):
-# =============================================================================
-#     The function will output the bottom matrix,
-#     the matrix can be use to calculate smoothing status.
-#     bottom matrix length is 2*iteration+1
-# =============================================================================
-
-    matrix_length = 2*iteration+3
-    sa, sb, sc, sd = 1/8, 1/16, 1/32, 1/64
-    matrix = np.zeros((iteration, matrix_length, matrix_length, matrix_length))
-    matrix_unit = np.array([[[sd,sc,sd],[sc,sb,sc],[sd,sc,sd]],
-                            [[sc,sb,sc],[sb,sa,sb],[sc,sb,sc]],
-                            [[sd,sc,sd],[sc,sb,sc],[sd,sc,sd]]])
-    matrix[iteration-1,iteration:iteration+3,iteration:iteration+3,iteration:iteration+3] = matrix_unit
-
-    for i in range(iteration-2,-1,-1):
-        for j in range(i+1, matrix_length-i-1):
-            for k in range(i+1, matrix_length-i-1):
-                for p in range(i+1, matrix_length-i-1):
-                    matrix[i,j,k,p] += np.sum(matrix[i+1,j-1:j+2,k-1:k+2,p-1:p+2] * matrix_unit)
-
-
-
-    return matrix[0,1:-1,1:-1,1:-1]
-
-
-def output_linear_vector_matrix(iteration,clip=0):
-# =============================================================================
-#     The function will output the bottom matrix,
-#     the matrix can be use to calculate vector from smoothing status.
-#     bottom matrix length is 2*iteration+1
-#     00 im 00
-#     jm CT jp
-#     00 ip 00
-# =============================================================================
-
-    matrix_length = 2*iteration+3
-    matrix_j = np.zeros((matrix_length, matrix_length))
-    matrix_i = np.zeros((matrix_length, matrix_length))
-    smoothing_matrix = output_linear_smoothing_matrix(iteration)
-    matrix_j[1:-1,2:] = smoothing_matrix
-    matrix_j[1:-1,0:-2] += -smoothing_matrix
-    matrix_i[2:,1:-1] = smoothing_matrix
-    matrix_i[0:-2,1:-1] += -smoothing_matrix
-
-    matrix_i = matrix_i[clip:matrix_length-clip, clip:matrix_length-clip]
-    matrix_j = matrix_j[clip:matrix_length-clip, clip:matrix_length-clip]
-
-    return matrix_i, matrix_j
-
-
-def output_linear_vector_matrix3D(iteration, clip=0):
-# =============================================================================
-#     The function will output the bottom matrix,
-#     the matrix can be use to calculate vector from smoothing status.
-#     bottom matrix length is 2*iteration+1
-#     00 jm 00
-# im  km CT kp   ip
-#     00 jp 00
-# =============================================================================
-
-    matrix_length = 2*iteration+3
-    matrix_j = np.zeros((matrix_length, matrix_length, matrix_length))
-    matrix_i = np.zeros((matrix_length, matrix_length, matrix_length))
-    matrix_k = np.zeros((matrix_length, matrix_length, matrix_length))
-    smoothing_matrix = output_linear_smoothing_matrix3D(iteration)
-    matrix_j[1:-1,2:,1:-1] = smoothing_matrix
-    matrix_j[1:-1,0:-2,1:-1] += -smoothing_matrix
-    matrix_i[2:,1:-1,1:-1] = smoothing_matrix
-    matrix_i[0:-2,1:-1,1:-1] += -smoothing_matrix
-    matrix_k[1:-1,1:-1,2:] = smoothing_matrix
-    matrix_k[1:-1,1:-1,0:-2] += -smoothing_matrix
-    matrix_i = matrix_i[clip:matrix_length-clip, clip:matrix_length-clip, clip:matrix_length-clip]
-    matrix_j = matrix_j[clip:matrix_length-clip, clip:matrix_length-clip, clip:matrix_length-clip]
-    matrix_k = matrix_k[clip:matrix_length-clip, clip:matrix_length-clip, clip:matrix_length-clip]
-
-    return matrix_i, matrix_j, matrix_k
-
-
-def find_window_3D(tableL,P,i,j,k):
-# =============================================================================
-#     The function will output the window around a specific site
-#     to calculate the incliantion in future
-# =============================================================================
-    fw_len = tableL
-    fw_half = int((fw_len-1)/2)
-    nx,ny,nz = P.shape
-    window = np.zeros((fw_len,fw_len,fw_len))
-
-    for wi in range(fw_len):
-        for wj in range(fw_len):
-            for wk in range(fw_len):
-                global_x = (i-fw_half+wi)%nx
-                global_y = (j-fw_half+wj)%ny
-                global_z = (k-fw_half+wk)%nz
-                if P[global_x,global_y,global_z] == P[i,j,k]:
-                    window[wi,wj,wk] = 1
-                else:
-                    window[wi,wj,wk] = 0
-
-    return window
-
-
-def find_window_2D(tableL,P,i,j):
-# =============================================================================
-#     The function will output the window around a specific site
-#     to calculate the incliantion in future
-# =============================================================================
-    fw_len = tableL
-    fw_half = int((fw_len-1)/2)
-    nx,ny = P.shape
-    window = np.zeros((fw_len,fw_len))
-
-    for wi in range(fw_len):
-        for wj in range(fw_len):
-            global_x = (i-fw_half+wi)%nx
-            global_y = (j-fw_half+wj)%ny
-            if P[global_x,global_y] == P[i,j]:
-                window[wi,wj] = 1
-            else:
-                window[wi,wj] = 0
-
-    return window
-
-
-def output_inclination_2D(loop_times, P, i, j):
-# =============================================================================
-#     The function will output the incliantion
-#     for a specific site
-# =============================================================================
-    tableL = 2*(loop_times+1)+1
-    window = np.zeros((tableL,tableL))
-    window = find_window_2D(tableL,P,i,j)
-
-    smoothed_vector_i, smoothed_vector_j = output_linear_vector_matrix(loop_times)
-
-    vec_i = np.sum(window*smoothed_vector_i)
-    vec_j = np.sum(window*smoothed_vector_j)
-    vec_len = np.sqrt(vec_i*vec_i+vec_j*vec_j)
-
-    if vec_len == 0:
-        return print("Please use boundary site")
-    else:
-        return -vec_i/vec_len, -vec_j/vec_len
-
-
-def output_inclination_3D(loop_times, P, i, j, k):
-# =============================================================================
-#     The function will output the incliantion
-#     for a specific site
-# =============================================================================
-    tableL = 2*(loop_times+1)+1
-    window = np.zeros((tableL,tableL,tableL))
-    window = find_window_3D(tableL,P,i,j,k)
-
-    smoothed_vector_i, smoothed_vector_j, smoothed_vector_k = output_linear_vector_matrix3D(loop_times)
-
-    vec_i = np.sum(window*smoothed_vector_i)
-    vec_j = np.sum(window*smoothed_vector_j)
-    vec_k = np.sum(window*smoothed_vector_k)
-    vec_len = np.sqrt(vec_i*vec_i + vec_j*vec_j + vec_k*vec_k)
-
-    return -vec_i/vec_len, -vec_j/vec_len, -vec_k/vec_len
-
-
-def unit_vector(vector):
-    return vector / np.linalg.norm(vector)
-
-
-def angle_between(v1, v2):
-    v1_u = unit_vector(v1)
-    v2_u = unit_vector(v2)
-    return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
-
-def angle_from_1_0(v):
-    a = angle_between((1,0), v)/np.pi*180
-    if v[1]<0: a = 360-a
-    return a
-
-
-def find_edge_indices(im, kernel_size=3, pad_mode='circular'):
-    #'im': torch, shape=(1,1,dim1, dim2)
-    im_unfold = my_unfoldNd(im, kernel_size)[0,]
-    is_edge = (torch.sum(im_unfold==im.reshape(1,-1), axis=0)<kernel_size**2).reshape(im.shape[2:]).cpu().numpy()
-    return np.stack(np.where(is_edge==True))
-
-
-def find_misorientation_single(q):
-    # 'q' - torch, quaternion, shape=(number of grains, 4)
     
-    # Create and expand symmetry quaternions (assumes cubic symmetry)
-    sym = torch.from_numpy(symetric_quaternions()).to(q.device)
-    tmp = torch.arange(24)
-    i0, j0 = list(torch.cartesian_prod(tmp,tmp).T) #pair indicies for expanding the symmetry orientations
-    symi = sym[i0,:].unsqueeze(0) 
-    symj = sym[j0,:].unsqueeze(0)
-    
-    # Assign quaternions
-    qi = q[0:1,:].unsqueeze(1)
-    qj = q[1:2,:].unsqueeze(1)
-    
-    # Multiply all pairs of symmetry orientations with all pairs of grain orientations (in this chunk)
-    q1 = quat_Multi(symi, qi)
-    q2 = quat_Multi(symj, qj)
-    
-    # Find the rotations between all pairs of orientations
-    q2[...,1:] = -q2[...,1:]
-    qq = quat_Multi(q1, q2).transpose(0,1)
-    
-    # Find the roation that gives the minimum angle
-    angle0 = 2*torch.acos(qq[...,0])
-    angle0[angle0>np.pi] = torch.abs(angle0[angle0>np.pi] - 2*np.pi)
-    angle = torch.min(angle0, axis=0)[0]
 
-    return angle #misorientation is the angle, radians
+def circle_stats(fp):
 
-
-def find_inclination(im):
-    #'im': torch, shape=(1, 1, dim1, dim2)
-    
-    indxs = find_edge_indices(im)      
-    im_inc = torch.zeros(im.shape)
-    for i, j in indxs.T: 
-        v = output_inclination_2D(5, im[0,0,].cpu().numpy(), i, j)
-        im_inc[0,0,i,j] = angle_from_1_0(v)
-
-    return im_inc
-
-
-def find_inclination_orientation_angle(im, ea, im_inc):
-    #'im': torch, shape=(1, 1, dim1, dim2)
-    #'ea': numpy, euler angles, shape=(num grains, 3)
-    #'im_inc': numpy, shape=(1 ,1, dim1, dim2)
-    indxs = find_edge_indices(im)  
-    im_diff = torch.zeros(im.shape)
-    for i, j in indxs.T: #for each boundary pixel index
-    
-        ids = im[0,0,i,j].cpu().numpy()
-        e = torch.from_numpy(ea[ids,][None,])
-        q1 = euler2quaternion(e)[0] #convert it to a quaternion
-        a = im_inc[0,0,i,j]/180*np.pi #find the inclination and convert it to radians
-        ax = np.array([1,0,0]) #choose an arbitrary axis
-        q2 = torch.from_numpy(np.concatenate([ax*np.sin(a/2), np.array([np.cos(a/2)])]))#convert angle axis to quaternion
-        q = torch.stack([q1,q2])
-        im_diff[0,0,i,j] = find_misorientation_single(q)
+    with h5py.File(fp, 'a') as f:
+        ims = f['sim0/ims_id'][:]
+        areas = ims.sum(1).sum(1).sum(1)
+        f['sim0/circle_area'] = areas
         
-    return im_diff
+        
+def circle_videos(fp):
+    
+    with h5py.File(fp, 'r') as f:
+        areas = f['sim0/circle_area'][:]
+        ims = f['sim0/ims_id'][:]
+        s = f['sim0/ims_id'].shape[2:]
+    
+    i_mid_growth = int(np.argmin(areas)/2)
+    im_mid_growth = ims[i_mid_growth,0]
+    plt.figure()
+    plt.imshow(im_mid_growth)
+    plt.title('Frame: %d'%i_mid_growth)
+    plt.savefig('./plots/circle_mid_growth_%dx%d'%s, dpi=300)
+    
+    ims = (255/np.max(ims)*ims).astype(np.uint8)
+    imageio.mimsave('./plots/ims_circle_%dx%d.mp4'%s, ims[:,0])
+    imageio.mimsave('./plots/ims_circle_%dx%d.gif'%s, ims[:,0])
+        
+
+def circle_plots(fps):
+    
+    if type(fps) is not list: fps = [fps]
+    
+    plt.figure()
+    for fp in fps:
+        with h5py.File(fp, 'r') as f:
+            areas = f['sim0/circle_area'][:]
+            s = f['sim0/ims_id'].shape[2:]
+        plt.plot(areas)
+    plt.title('Circle area over time')
+    plt.xlabel('Frames')
+    plt.ylabel('Circle Aera')
+    plt.savefig('./plots/circle_area_over_time_%dx%d'%s, dpi=300)
 
 
 
@@ -1942,27 +2648,49 @@ def find_ncombo(im, n=3):
 
 def find_ncombo_avg(ncombo, sz):
     #Find the average of indices with the same ID combinations
-    #"ncombo" - shape=(n+2, num ID sets), sets of n combinations neighbors
+    #"ncombo" - shape=(n+d, num ID sets), sets of 'n' combinations neighbors in 'd' dimensions
     #For 2D and 3D
     #Assumes triplets only
     
     ids = ncombo[:3,][None,] #retrieve only the grain ID sets
-    matches = torch.all(ids==ids.T, dim=1) #contruct a matching matrix (find which ID sets are equal)
     
-    #Find the mean without zeros of all matching ID sets - when there is a "0" and a "256" in the locations, wrap "256" to "-1"
-    nmatch = torch.sum(matches, dim=1) 
+    log = []
+    for i in range(ids.shape[2]):
+        sid = ids[:,:,i][...,None]
+        match = torch.all(ids==sid.T, dim=1)
+        nmatch = match.sum()
     
-    tmp = []
-    for i in range(len(sz)): 
-        num_hi = torch.sum(matches*ncombo[i+3,:]==sz[i]-1, dim=1)
-        has0 = torch.sum(matches*ncombo[i+3,:]!=0, dim=1)!=nmatch
-        tmpi = torch.sum(matches*ncombo[i+3,:], dim=1)-(sz[i]*num_hi*has0)
-        tmp.append(tmpi/nmatch) #mean without zero
+        tmp = []
+        for j in range(len(sz)): 
+            num_hi = torch.sum(match*ncombo[j+3,:]==sz[j]-1, dim=1)
+            has0 = torch.sum(match*ncombo[j+3,:]!=0, dim=1)!=nmatch
+            tmpi = torch.sum(match*ncombo[j+3,:], dim=1)-(sz[j]*num_hi*has0)
+            tmp.append(tmpi/nmatch) #mean without zero
+            
+        log.append(torch.cat([sid[0,:,0,], *tmp]))
+    if len(log)==0: 
+        ncombo_avg = torch.zeros([5,0]).to(ncombo.device)
+    else:
+        ncombo_avg = torch.stack(log).T
+        ncombo_avg = torch.unique(ncombo_avg, dim=1) #remove duplicates
+
+    
+    # matches = torch.all(ids==ids.T, dim=1) #contruct a matching matrix (find which ID sets are equal)
+    # nmatch = torch.sum(matches, dim=1) 
+    
+    # #Find the mean without zeros of all matching ID sets - when there is a "0" and a "256" in the locations, wrap "256" to "-1"
+    # tmp = []
+    # for i in range(len(sz)): 
+    #     num_hi = torch.sum(matches*ncombo[i+3,:]==sz[i]-1, dim=1)
+    #     has0 = torch.sum(matches*ncombo[i+3,:]!=0, dim=1)!=nmatch
+    #     tmpi = torch.sum(matches*ncombo[i+3,:], dim=1)-(sz[i]*num_hi*has0)
+    #     tmp.append(tmpi/nmatch) #mean without zero
         
-    ncombo_avg = torch.stack([*ids[0], *tmp]) #add IDs back in
-    ncombo_avg = torch.unique(ncombo_avg, dim=1) #remove duplicates
+    # ncombo_avg = torch.stack([*ids[0], *tmp]) #add IDs back in
+    # ncombo_avg = torch.unique(ncombo_avg, dim=1) #remove duplicates
     
-    if len(ncombo_avg)==0: ncombo_avg = torch.zeros([5,0]).to(ncombo.device)
+    # if len(ncombo_avg)==0: ncombo_avg = torch.zeros([5,0]).to(ncombo.device)
+    
     
     # num_hi = torch.sum(matches*ncombo[-2,:]==sz[0]-1, dim=1)
     # has0 = torch.sum(matches*ncombo[-2,:]!=0, dim=1)!=nmatch
@@ -2032,10 +2760,21 @@ def test_num_junctions_through_time(ims):
 def find_juntion_neighbors(ncombo_avg):
     #For each junction, find the junctions that share exactly 2 IDs
     
+    ids = ncombo_avg[:3,]
+    
+    #This code is not the same thing as below, troubleshoot before using
+    # log = []
+    # for i in range(ids.shape[1]):
+    #     ids_curr = ids[:,i][:,None]
+    #     adj_tmp = ((ids==ids_curr).sum(0))==2
+    #     log.append(adj_tmp)
+    # adjacent0 = torch.stack(log)
+    
     ids = ncombo_avg[:3,].flatten()[None,]
     adj_tmp = ids==ids.T #compare all ID values
     tmp = ncombo_avg.shape[1]
     adjacent = (adj_tmp.reshape(3,tmp,3,tmp).sum(0).sum(1))==2 #mark junctions that have exactly 2 IDs the same
+    
     return adjacent
 
 
@@ -2071,57 +2810,7 @@ def calc_dihedral_angles(junction_angles):
 
 def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
     #'im' - shape=(1,1,dim1,dim2), microstructureal image in which to find junction digedral angles
-    #output - shape=(6, number of junctions), first three numbers are the IDs that define the junction, the last three are the dihedral angles between ID indices 0/1, 1/2, and 0/2
-   
-    
-    
-    #I wrote this all. It ended up not being neccesary. I can't get myself to delete it yet. 
-    
-    # # Find junction and edge values and locations
-    # tmp = find_ncombo(im, n=3) #find all indices included in a triplet
-    # jct = find_ncombo_avg(tmp, im.shape[2:]) #find each triplet location
-    # jct_vals = jct[:3]
-    # jct_locs = jct[3:]
-    # edg = find_ncombo(im, n=2) #find edge indicies
-    # edg_vals = edg[:2]
-    # edg_locs = edg[2:]
-    
-    # i = torch.Tensor([[0,1],[0,2],[1,2]]).long()
-    # jct_val_combos = jct_vals[i]
-    
-    # tmp_jct_val_combos = jct_val_combos[:,:,:,None] #reshape for comparison
-    # tmp_edg_vals = edg_vals[None,:,None,:] #reshape for comparison
-    # value_matches = (tmp_jct_val_combos==tmp_edg_vals).sum(1)
-    # is_match = value_matches==2
-
-    # # 
-    # num_edge_points = is_match.sum(2)
-    # i_jct_valid = (num_edge_points>=4).all(0)
-    # jpair_edges = is_match[:,i_jct_valid,].reshape(-1,11356)
-    
-    # # Create a padded matrix to hold edge indices
-    # i, j = torch.where(jpair_edges) #jpair_edges is number of valid jpairs x number of edges
-    # edges_all = edg_locs[:,j].T
-    # edges_len = jpair_edges.sum(1)
-    # edges_split = torch.split(edges_all, list(edges_len))
-    # edges_padded = torch.nn.utils.rnn.pad_sequence(edges_split, padding_value=0)
-    
-    # # Oversample non-zero values to fill in the padded zero regions
-    # i = ((edges_len[None,])*torch.rand(edges_padded.shape[:2]).to(im.device)).long()
-    # edges = edges_padded[i, torch.arange(edges_padded.shape[1]).long(), :]
-    
-    # # Append the start junction location (ensure this is the location that is set to [0,0] for the line fit)
-    # edg_jct_locs = jct_locs[:,i_jct_valid,None].repeat(1,1,3).reshape(2,-1).permute(1,0)[None,]
-    # edges = torch.cat([edg_jct_locs, edges])
-    
-    # # Unwrap edge indices that jump from one boundary to the other
-    # h = edges.max(0)[0].max(0)[0][None,None]
-    # tmp = edges-edg_jct_locs
-    # edges = edges - h*torch.sign(tmp)*(torch.abs(tmp)>(h/2))
-    
-    # junction_ids = jct_vals[:,i_jct_valid]
-    
-    
+    #output - shape=(6, number of junctions), first three numbers are the IDs that define the junction, the last three are the dihedral angles between ID indices 0/1, 1/2, and 0/2    
     
     # Find triplet indices and neighbors 
     ncombo = find_ncombo(im, n=3) #find all indices included in a triplet
@@ -2147,21 +2836,31 @@ def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
     
     # Find the edge indices that belong to each junction pair
     ncombo = find_ncombo(im, n=2) #find edge indicies
-    jpair_edges = torch.all(jpair_ids.T[:,:,None]==ncombo[:-2][None,], dim=1) #These don't neccesarily include the junctions yet, because junctions are an average of triplets that don't include just these two ids
     
-    #Remove all of the jpairs that have any edge that has a length four or less
-    edges_len = jpair_edges.sum(1)
+    log = []
+    for i in range(jpair_ids.shape[1]):
+        jpair_id = jpair_ids[:,i][:,None]
+        jpair_edge = torch.all(jpair_id==ncombo[:-2], dim=0)
+        log.append(jpair_edge)
+    if len(log)==0: 
+        return None
+    else:
+        jpair_edges = torch.stack(log)
+    # jpair_edges = torch.all(jpair_ids[:,:100].T[:,:,None]==ncombo[:-2][None,], dim=1) #These don't neccesarily include the junctions yet, because junctions are an average of triplets that don't include just these two ids
+    
+    #Remove all of the jpairs that have any edge that has a length of four or less
+    edges_len = my_batch(jpair_edges, torch.sum, 100)
     i = (edges_len>4).reshape(-1,3).all(1)
     j = i[:,None].repeat(1,3).flatten()
     jpairs = jpairs[:,:,j]
     jpair_edges = jpair_edges[j,]
+    edges_len = edges_len[j]
     
     if len(jpair_edges)==0: return None
     
     # Create a padded matrix to hold edge indices
-    i, j = torch.where(jpair_edges)
+    i, j = batch_where(jpair_edges, 100)
     edges_all = ncombo[-2:,j].T
-    edges_len = jpair_edges.sum(1)
     edges_split = torch.split(edges_all, list(edges_len))
     edges_padded = torch.nn.utils.rnn.pad_sequence(edges_split, padding_value=0)
     
@@ -2189,14 +2888,30 @@ def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
     points = points - points[0,:,:]
     x = points[...,0].T
     y = points[...,1].T
-    A = torch.stack([x, x**2, x**3]).permute(1,2,0)
+    A = torch.stack([x, x**2]).permute(1,2,0)
     B = y[...,None]
-    sx, rx0, _, _ = torch.linalg.lstsq(A, B)
+    log_sx = []
+    log_rx0 = []
+    for i in range(A.shape[0]):
+        sx, rx0, _, _ = torch.linalg.lstsq(A[i], B[i])
+        log_sx.append(sx)
+        log_rx0.append(rx0)
+    sx = torch.stack(log_sx)
+    rx0 = torch.stack(log_rx0)
+    # sx, rx0, _, _ = torch.linalg.lstsq(A, B)
     rx = ((torch.matmul(A,sx)-B)[...,0]**2).sum(1)[:,None]
     
-    A = torch.stack([y, y**2, y**3]).permute(1,2,0)
+    A = torch.stack([y, y**2]).permute(1,2,0)
     B = x[...,None]
-    sy, ry0, _, _ = torch.linalg.lstsq(A, B)
+    log_sy = []
+    log_ry0 = []
+    for i in range(A.shape[0]):
+        sy, ry0, _, _ = torch.linalg.lstsq(A[i], B[i])
+        log_sy.append(sy)
+        log_ry0.append(ry0)
+    sy = torch.stack(log_sy)
+    ry0 = torch.stack(log_ry0)
+    # sy, ry0, _, _ = torch.linalg.lstsq(A, B)
     ry = ((torch.matmul(A,sy)-B)[...,0]**2).sum(1)[:,None]
     
     # Find junction angles and then dihedral angles
@@ -2215,6 +2930,50 @@ def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
     dihedral_angles = calc_dihedral_angles(junction_angles)
     
     junction_ids = jpairs[0,:3].reshape(3,-1,3)[:,:,0]
+    
+    
+    
+    # iii = 560
+    
+    # sx[iii]
+    # rx[iii]
+    # sy[iii]
+    # ry[iii]
+    
+    # sy, ry0, _, _ = torch.linalg.lstsq(A[iii], B[iii]+0.5)
+    
+    # y_new = torch.linspace(-12,0,100).to(device)
+    # x_fit = sy[0]*y_new + sy[1]*y_new**2 + sy[2]*y_new**3
+    # plt.plot(y_new.cpu(), x_fit.cpu())
+    
+    # plt.plot(A[iii,:,0].cpu(), B[iii,:,0].cpu()+0.5,'.')
+    
+    
+    # dihedral_angles[:,186]
+    # iii = 275*3
+    # aaa = points[:,iii+1].cpu()
+    # bbb = points[:,iii+2].cpu()
+    
+    # plt.plot(bbb)
+    
+    # plt.plot(aaa[:,0],aaa[:,1],'.')
+    
+    # points[:,iii+1]-points[:,iii+2]
+    
+    
+    # junction_ids[:,275]
+
+    # im.shape
+    # plt.imshow(im[0,0].cpu()==514)  
+    # # plt.imshow(im[0,0].cpu()==3788) 
+    # # plt.imshow(im[0,0].cpu()==3878) 
+    # plt.xlim([100,200])
+    # plt.ylim([900,1000])
+    
+    #between 3788, 514
+    #either 826, 827
+    
+    
     
     # Plot junctions with edge indices and fit lines
     if if_plot:
@@ -2236,13 +2995,15 @@ def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
             x_tmp = points[...,0]
             x_fit = torch.stack([torch.linspace(torch.min(x_tmp[:,k]), torch.max(x_tmp[:,k]), 100) for k in range(x_tmp.shape[1])]).to(im.device)
             ss = sx[...,0]
-            y_fit = (ss[:,0:1]*x_fit + ss[:,1:2]*x_fit**2 + ss[:,2:]*x_fit**3 + y_os).T
+            # y_fit = (ss[:,0:1]*x_fit + ss[:,1:2]*x_fit**2 + ss[:,2:]*x_fit**3 + y_os).T
+            y_fit = (ss[:,0:1]*x_fit + ss[:,1:2]*x_fit**2 + y_os).T
             x_fit = (x_fit + x_os).T
             
             y_tmp = points[...,1]
             y0 = torch.stack([torch.linspace(torch.min(y_tmp[:,k]), torch.max(y_tmp[:,k]), 100) for k in range(y_tmp.shape[1])]).to(im.device)
             ss = sy[...,0]
-            x0 = (ss[:,0:1]*y0 + ss[:,1:2]*y0**2 + ss[:,2:]*y0**3 + x_os).T
+            # x0 = (ss[:,0:1]*y0 + ss[:,1:2]*y0**2 + ss[:,2:]*y0**3 + x_os).T
+            x0 = (ss[:,0:1]*y0 + ss[:,1:2]*y0**2 + x_os).T
             y0 = (y0 + y_os).T
             
             x_fit[:,i] = x0[:,i]
@@ -2327,15 +3088,43 @@ def num_diff_neighbors(ims, window_size=3, pad_mode='circular'):
     #window_size - the patch around each pixel that constitutes its neighbors
     #May need to add memory management through batches for large tensors in the future
     
+    
+    #NEW #!!!
     if type(window_size)==int: window_size = [window_size] #convert to "list" if "int" is given
     
-    ims_unfold = my_unfoldNd(ims, kernel_size=window_size, pad_mode=pad_mode)
-    center_pxl_ind = int(ims_unfold.shape[1]/2)
-    ims_diff_unfold = torch.sum(ims_unfold[:,center_pxl_ind,] != ims_unfold.transpose(0,1), dim=0) #shape = [N, dim1*dim2*dim3]
+    d = ims.dim()-2
+    kernel_sz = window_size*d
+    stride = (1,)*d
     
+    batch_sz = int(unfold_mem_lim/(torch.prod(torch.Tensor(kernel_sz))*64))
+    unfold_gen = unfold_in_batches(ims[0,0], batch_sz, kernel_sz, stride, pad_mode)
+    
+    log = []
+    for batch in unfold_gen:
+        im_unfold = batch.reshape(batch.shape[0],-1).T[None,]
+        center_pxl_ind = int(im_unfold.shape[1]/2)
+        tmp = torch.sum(im_unfold[:,center_pxl_ind,] != im_unfold.transpose(0,1), dim=0)
+        log.append(tmp)
+        
     if pad_mode==None: s = ims.shape[:2]+tuple(np.array(ims.shape[2:])-window_size+1)
     else: s = ims.shape
-    return ims_diff_unfold.reshape(s) #reshape to orignal image shape
+    ims_diff = torch.cat(log, dim=1).reshape(s) #misorientation image
+    
+    
+    #delete this later
+    # if type(window_size)==int: window_size = [window_size] #convert to "list" if "int" is given
+    
+    # ims_unfold = my_unfoldNd(ims, kernel_size=window_size, pad_mode=pad_mode)
+    # center_pxl_ind = int(ims_unfold.shape[1]/2)
+    # ims_diff_unfold = torch.sum(ims_unfold[:,center_pxl_ind,] != ims_unfold.transpose(0,1), dim=0) #shape = [N, dim1*dim2*dim3]
+    
+    # if pad_mode==None: s = ims.shape[:2]+tuple(np.array(ims.shape[2:])-window_size+1)
+    # else: s = ims.shape
+    
+    # ims_diff = ims_diff_unfold.reshape(s) 
+    
+    
+    return ims_diff
 
 
 def num_diff_neighbors_inline(ims_unfold): 
@@ -2353,20 +3142,20 @@ def compute_action_energy_change(im, im_next, energy_dim=3, act_dim=9, pad_mode=
     #The difference is the energy change
     #FUTURE WORK -> If I change how the num-neighbors function works, I could probably use expand instead of repeat
     
-    num_dims = len(im.shape)-2
+    num_dims = im.dim()-2
     
     windows_curr_obs = my_unfoldNd(im_next, kernel_size=energy_dim, pad_mode=pad_mode) 
-    current_energy = num_diff_neighbors_inline(windows_curr_obs)
-    windows_curr_act = my_unfoldNd(im, kernel_size=act_dim, pad_mode=pad_mode)
-    windows_next_obs = my_unfoldNd(im_next, kernel_size=energy_dim, pad_mode=pad_mode)
+    current_energy = num_diff_neighbors_inline(windows_curr_obs) #torch.Size([1, 66049])
+    windows_curr_act = my_unfoldNd(im, kernel_size=act_dim, pad_mode=pad_mode) #torch.Size([1, 289, 66049])
+    windows_next_obs = my_unfoldNd(im_next, kernel_size=energy_dim, pad_mode=pad_mode) #torch.Size([1, 9, 66049])
     
     ll = []
     for i in range(windows_curr_act.shape[1]):
         windows_next_obs[:,int(energy_dim**num_dims/2),:] = windows_curr_act[:,i,:]
         ll.append(num_diff_neighbors_inline(windows_next_obs))
-    action_energy = torch.cat(ll)[...,None]
+    action_energy = torch.cat(ll)[...,None] #torch.Size([289, 66049, 1])
     
-    energy_change = (current_energy.transpose(0,1)-action_energy)/(energy_dim**num_dims-1)
+    energy_change = (current_energy.transpose(0,1)[None,]-action_energy)/(energy_dim**num_dims-1) #torch.Size([289, 66049, 1])
     
     return energy_change
     
@@ -2377,10 +3166,9 @@ def compute_energy_labels(im_seq, act_dim=9, pad_mode="circular"):
     #The total energy label is a decay sum of those action energy changes
     
     # CALCULATE ALL THE ACTION ENERGY CHANGES
-    size = im_seq.shape[1:]
     energy_changes = []
-    for i in range(im_seq.shape[0]-1):
-        ims_curr = im_seq[i].unsqueeze(0)
+    for i in range(im_seq.shape[0]-1): 
+        ims_curr = im_seq[i].unsqueeze(0) 
         ims_next = im_seq[i+1].unsqueeze(0)
         energy_change = compute_action_energy_change(ims_curr, ims_next, act_dim=act_dim, pad_mode=pad_mode)
         energy_changes.append(energy_change)
@@ -2389,43 +3177,152 @@ def compute_energy_labels(im_seq, act_dim=9, pad_mode="circular"):
     energy_change = torch.cat(energy_changes, dim=2)
     decay_rate = 1/2
     decay = decay_rate**torch.arange(1,im_seq.shape[0]).reshape(1,1,-1).to(im_seq.device)
-    energy_labels = torch.sum(energy_change*decay, dim=2).transpose(0,1).reshape((np.product(size),)+(act_dim,)*(len(size)-1))
+    energy_labels = torch.sum(energy_change*decay, dim=2).transpose(0,1).reshape((-1,)+(act_dim,)*(im_seq.dim()-2))
     
     return energy_labels
+
+
+def compute_energy_labels_gen(im_seq, batch_sz, act_dim=9, energy_dim=3, pad_mode="circular"): #!!! NEW
+    #Computes energy labels used for PRIMME regularization
+    #Yields in batches to conserve memory
+    #Find possible actions around each pixel in a "act_dim" neighborhood
+    #Compute number of different neighbors as energy using a "energy_dim" neighborhood
+    #Energy labels are the change in energy for each possible action (initial minus action energy)
+    #Repeat for each future step and sum together with a discount of 1/2
+    
+    #Find parameters
+    num_fut = im_seq.shape[0]-1 #number of future steps
+    d = im_seq.dim()-2 #number of dimensions
+    stride = [num_fut,]+[1,]*d 
+    num_iter = int(np.ceil(np.prod(im_seq.shape[1:])/batch_sz))
+    
+    #Find current energy
+    log = []
+    for im in im_seq[1:]: 
+         log.append(num_diff_neighbors(im[None,], window_size=energy_dim, pad_mode=pad_mode))
+    current_energy = torch.cat(log).reshape(num_fut,-1).T
+    
+    #Create generators
+    current_energy_split = current_energy.split(batch_sz)
+    windows_curr_act_gen = unfold_in_batches(im_seq[:-1,0], batch_sz, [num_fut]+[act_dim,]*d, stride, pad_mode)
+    windows_next_obs_gen = unfold_in_batches(im_seq[1:,0], batch_sz, [num_fut]+[energy_dim,]*d, stride, pad_mode)
+    
+    #Yield the energy labels for each batch
+    for i in range(num_iter):
+        current_energy = current_energy_split[i]
+        windows_curr_act = next(windows_curr_act_gen).reshape(-1, num_fut, act_dim**d).unsqueeze(3)
+        windows_next_obs = next(windows_next_obs_gen).reshape(-1, num_fut, energy_dim**d).unsqueeze(2)#.repeat(1,1,windows_curr_act.shape[-1],1)
+        tmp = windows_next_obs != windows_curr_act 
+        action_energy = tmp.sum(-1) - tmp[..., int(energy_dim**d/2)].int() 
+        energy_change = (current_energy[..., None]-action_energy)/(energy_dim**d-1)
+        
+        decay_rate = 1/2
+        decay = decay_rate**torch.arange(1,im_seq.shape[0]).reshape(1,-1,1).to(im_seq.device)
+        energy_labels = (energy_change*decay).sum(1).reshape((-1,)+(act_dim,)*(im_seq.dim()-2))
+        
+        yield energy_labels
 
 
 def compute_action_labels(im_seq, act_dim=9, pad_mode="circular"):
     #Label which actions in each action window were actually taken between the first image and all following
     #The total energy label is a decay sum of those action labels
-
-    size = im_seq.shape[1:]
+    
+    sz = im_seq.shape
     im = im_seq[0:1,]
     ims_next = im_seq[1:]
     
     # CALCULATE ACTION LABELS
     window_act = my_unfoldNd(im, kernel_size=act_dim, pad_mode=pad_mode)[0]
     ims_next_flat = ims_next.view(ims_next.shape[0], -1)
-    
-    actions_marked = window_act.unsqueeze(0).expand(4,-1,-1)==ims_next_flat.unsqueeze(1) #Mark the actions that matches each future image (the "action taken")
+    actions_marked = window_act.unsqueeze(0).expand(sz[0]-1,-1,-1)==ims_next_flat.unsqueeze(1) #Mark the actions that matches each future image (the "action taken")
     decay_rate = 1/2
     decay = decay_rate**torch.arange(1,im_seq.shape[0]).reshape(-1,1,1).to(im.device)
-    action_labels = torch.sum(actions_marked*decay, dim=0).transpose(0,1).reshape((np.product(size),)+(act_dim,)*(len(size)-1))
+    action_labels = torch.sum(actions_marked*decay, dim=0).transpose(0,1).reshape((-1,)+(act_dim,)*(im_seq.dim()-2))
     
     return action_labels
 
 
-def compute_labels(im_seq, obs_dim=9, act_dim=9, reg=1, pad_mode="circular"):
+def compute_action_labels_gen(im_seq, batch_sz, act_dim=9, pad_mode="circular"): #!!! NEW
+    #Label which actions in each action window were actually taken between the first image and all following
+    #The total energy label is a decay sum of those action labels
+    
+    #Find parameters
+    num_fut = im_seq.shape[0]-1 #number of future steps
+    d = im_seq.dim()-2 #number of dimensions
+    num_iter = int(np.ceil(np.prod(im_seq.shape[1:])/batch_sz))
+    
+    #Create generators
+    im = im_seq[0:1,]
+    ims_next = im_seq[1:].reshape(num_fut,-1).T
+    ims_next_split = ims_next.split(batch_sz)
+    window_act_gen = unfold_in_batches(im[0,0,], batch_sz, [act_dim,]*d, [1,]*d, pad_mode)
+    
+    #Yield the energy labels for each batch
+    for i in range(num_iter):
+        ims_next = ims_next_split[i]
+        window_act = next(window_act_gen).reshape(-1,act_dim**d)
+        actions_marked = window_act.unsqueeze(1) == ims_next.unsqueeze(2)
+        
+        decay_rate = 1/2
+        decay = decay_rate**torch.arange(1,im_seq.shape[0]).reshape(1,-1,1).to(im_seq.device)
+        action_labels = (actions_marked*decay).sum(1).reshape((-1,)+(act_dim,)*(im_seq.dim()-2))
+            
+        yield action_labels
+    
+    
+def compute_labels(im_seq, act_dim=9, reg=1, pad_mode="circular"):
     energy_labels = compute_energy_labels(im_seq, act_dim=act_dim, pad_mode=pad_mode)
     action_labels = compute_action_labels(im_seq, act_dim=act_dim, pad_mode=pad_mode)
+    
+    # action_labels = my_normalize(action_labels)
+   
     labels = action_labels + reg*energy_labels
+    
+    # labels = (labels+reg)/(reg+1)
+    
+    # labels = my_normalize(labels)
+    
     return labels
 
 
+def compute_labels_gen(im_seq, batch_sz, act_dim=9, energy_dim=3, reg=1, pad_mode="circular"): #!!! NEW 
+        
+    #Find parameters
+    num_iter = int(np.ceil(np.prod(im_seq.shape[1:])/batch_sz))
+    
+    #Create generators
+    energy_labels_gen = compute_energy_labels_gen(im_seq, batch_sz, act_dim, energy_dim, pad_mode)
+    action_labels_gen = compute_action_labels_gen(im_seq, batch_sz, act_dim, pad_mode)
+    
+    #Yield the energy labels for each batch
+    for i in range(num_iter):
+        energy_labels = next(energy_labels_gen)
+        action_labels = next(action_labels_gen)
+        labels = action_labels + reg*energy_labels
+        yield labels
+    
+
+def my_normalize(data):
+    mi = torch.min(data)
+    ma = torch.max(data)
+    return (data-mi)/(ma-mi)
+    
+
 def compute_features(im, obs_dim=9, pad_mode='circular'):
-    size = im.shape[1:]
     local_energy = num_diff_neighbors(im, window_size=7, pad_mode=pad_mode)
-    features = my_unfoldNd(local_energy.float(), obs_dim, pad_mode=pad_mode).T.reshape((np.product(size),)+(obs_dim,)*(len(size)-1))
+    features = my_unfoldNd(local_energy.float(), obs_dim, pad_mode=pad_mode).T.reshape((-1,)+(obs_dim,)*(im.dim()-2))
     return features
+
+
+def compute_features_gen(im, batch_sz, obs_dim=9, pad_mode='circular'): #NEW #!!!
+    local_energy = num_diff_neighbors(im, window_size=7, pad_mode=pad_mode)
+    
+    d = local_energy.dim()-2
+    unfold_gen = unfold_in_batches(local_energy[0,0], batch_sz, [obs_dim,]*d, (1,)*d, pad_mode)
+    
+    for batch in unfold_gen:
+        yield batch
+
 
 
 
@@ -2473,7 +3370,6 @@ def compute_energy_labels_miso(im_seq, miso_matrix, act_dim=9, pad_mode="circula
     #The total energy label is a decay sum of those action energy changes
     
     # CALCULATE ALL THE ACTION ENERGY CHANGES
-    size = im_seq.shape[1:]
     energy_changes = []
     for i in range(im_seq.shape[0]-1):
         ims_curr = im_seq[i].unsqueeze(0)
@@ -2485,7 +3381,7 @@ def compute_energy_labels_miso(im_seq, miso_matrix, act_dim=9, pad_mode="circula
     energy_change = torch.cat(energy_changes, dim=2)
     decay_rate = 1/2
     decay = decay_rate**torch.arange(1,im_seq.shape[0]).reshape(1,1,-1).to(im_seq.device)
-    energy_labels = torch.sum(energy_change*decay, dim=2).transpose(0,1).reshape((np.product(size),)+(act_dim,)*(len(size)-1))
+    energy_labels = torch.sum(energy_change*decay, dim=2).transpose(0,1).reshape((-1,)+(act_dim,)*(im_seq.dim()-2))
     
     return energy_labels
 
@@ -2499,79 +3395,25 @@ def compute_labels_miso(im_seq, miso_matrix, obs_dim=9, act_dim=9, reg=1, pad_mo
     action_labels = compute_action_labels(im_seq, act_dim=act_dim, pad_mode=pad_mode)
     labels = action_labels + reg*energy_labels
     
-    
     # labels = (labels+reg)/(2+reg) #scale from [-reg, 1+reg] to [0,1]
     
     return labels
 
 
 def compute_features_miso(im, miso_matrix, obs_dim=9, pad_mode='circular'):
-    size = im.shape[1:]
     local_energy = neighborhood_miso(im, miso_matrix, window_size=7, pad_mode=pad_mode)
     # local_energy = neighborhood_miso_spparks(im, miso_matrix, window_size=7, pad_mode=pad_mode)
-    features = my_unfoldNd(local_energy.float(), obs_dim, pad_mode=pad_mode).T.reshape((np.product(size),)+(obs_dim,)*(len(size)-1))
+    features = my_unfoldNd(local_energy.float(), obs_dim, pad_mode=pad_mode).T.reshape((-1,)+(obs_dim,)*(im.dim()-2))
+    
     return features
 
 
-
-
-
-# def train_primme(trainset, num_eps, dims=2, obs_dim=17, act_dim=17, lr=5e-5, reg=1, pad_mode="circular", if_plot=False):
+def compute_features_miso_gen(im, batch_sz, miso_matrix, obs_dim=9, pad_mode='circular'): #NEW #!!!
+    local_energy = neighborhood_miso(im, miso_matrix, window_size=7, pad_mode=pad_mode)
+    # local_energy = neighborhood_miso_spparks(im, miso_matrix, window_size=7, pad_mode=pad_mode)
     
-#     append_name = trainset.split('_kt')[1]
-#     modelname = "./data/model_dim(%d)_sz(%d_%d)_lr(%.0e)_reg(%d)_ep(%d)_kt%s"%(dims, obs_dim, act_dim, lr, reg, num_eps, append_name)
-#     agent = PRIMME(obs_dim=obs_dim, act_dim=act_dim, pad_mode=pad_mode, learning_rate=lr, num_dims=dims)
-    
-#     for _ in tqdm(range(num_eps), desc='Epochs', leave=True):
-#         agent.sample_data(trainset, batch_size=1)
-#         agent.train()
-#         if if_plot: agent.plot()
-#         agent.save(modelname)
-    
-#     return modelname
-
-
-# def run_primme(ic, ea, nsteps, modelname, miso_array=None, pad_mode='circular', if_plot=False):
-    
-#     # Setup
-#     agent = PRIMME()
-#     agent.load(modelname)
-#     agent.pad_mode = pad_mode
-#     im = torch.Tensor(ic).unsqueeze(0).unsqueeze(0).float().to(agent.device)
-#     size = ic.shape
-#     ngrain = len(torch.unique(im))
-#     tmp = np.array([8,16,32], dtype='uint64')
-#     dtype = 'uint' + str(tmp[np.sum(ngrain>2**tmp)])
-#     if np.all(miso_array==None): miso_array = find_misorientation(ea, mem_max=1) 
-#     miso_matrix = miso_array_to_matrix(torch.from_numpy(miso_array[None,]))[0]
-#     append_name = modelname.split('_kt')[1]
-#     fp_save = './data/primme_sz(%dx%d)_ng(%d)_nsteps(%d)_freq(1)_kt%s'%(size[0],size[1],ngrain,nsteps,append_name)
-    
-#     # Run simulation
-#     ims_id = im
-#     for _ in tqdm(range(nsteps), 'Running PRIMME simulation: '):
-#         im = agent.step(im.clone(), miso_matrix[None,].to(agent.device), evaluate=False)
-#         ims_id = torch.cat([ims_id, im])
-#         if if_plot: plt.imshow(im[0,0,].cpu()); plt.show()
-    
-#     ims_id = ims_id.cpu().numpy()
-    
-#     # Save Simulation
-#     with h5py.File(fp_save, 'a') as f:
-        
-#         # If file already exists, create another group in the file for this simulaiton
-#         num_groups = len(f.keys())
-#         hp_save = 'sim%d'%num_groups
-#         g = f.create_group(hp_save)
-        
-#         # Save data
-#         dset = g.create_dataset("ims_id", shape=ims_id.shape, dtype=dtype)
-#         dset2 = g.create_dataset("euler_angles", shape=ea.shape)
-#         dset3 = g.create_dataset("miso_array", shape=miso_array.shape)
-#         dset4 = g.create_dataset("miso_matrix", shape=miso_matrix.shape)
-#         dset[:] = ims_id
-#         dset2[:] = ea
-#         dset3[:] = miso_array #radians (does not save the exact "Miso.txt" file values, which are degrees divided by the cutoff angle)
-#         dset4[:] = miso_matrix #same values as mis0_array, different format
-
-#     return ims_id, fp_save
+    d = local_energy.dim()-2
+    unfold_gen = unfold_in_batches(local_energy[0,0], batch_sz, [obs_dim,]*d, (1,)*d, pad_mode)
+      
+    for batch in unfold_gen:
+        yield batch

@@ -519,6 +519,31 @@ def find_avg_intersect(midpoints, is_valid):
 
 ### MAIN
 
+
+#run a mode filter with certain f values
+
+
+
+ic, ea, _ = fs.voronoi2image(size=[64, 64], ngrain=6) 
+ims_id = run_mf(ic, ea, nsteps=100, cut=0, cov_mat=torch.Tensor([[3,0],[0,3]]), num_samples=64, memory_limit=1e10)
+
+im = torch.from_numpy(ims_id[0,0])
+im2 = torch.from_numpy(ims_id[1,0])
+
+coords, samples, index = find_sample_coords(im, cov_mat=torch.Tensor([[3,0],[0,3]]), num_samples=64)
+ 
+im_expand = im.reshape(-1,1).expand(-1, im.numel())
+im_sampled = torch.gather(im_expand, dim=0, index=index)
+outcomes = im2.reshape(-1)
+
+
+
+
+
+
+
+
+
 # Create a set of ratios (assuming three grains)
 d = 3
 m = 5000
@@ -563,21 +588,7 @@ print(xt-x*xt[0])
 
 
 
-#run a mode filter with certain f values
 
-
-
-ic, ea, _ = fs.voronoi2image(size=[64, 64], ngrain=6) 
-ims_id = run_mf(ic, ea, nsteps=100, cut=0, cov_mat=torch.Tensor([[3,0],[0,3]]), num_samples=64, memory_limit=1e10)
-
-im = torch.from_numpy(ims_id[0,0])
-im2 = torch.from_numpy(ims_id[1,0])
-
-coords, samples, index = find_sample_coords(im, cov_mat=torch.Tensor([[3,0],[0,3]]), num_samples=64)
- 
-im_expand = im.reshape(-1,1).expand(-1, im.numel())
-im_sampled = torch.gather(im_expand, dim=0, index=index)
-outcomes = im2.reshape(-1)
 
 
 
