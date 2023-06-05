@@ -135,7 +135,7 @@ def normal_mode_filter(im, miso_matrix=None, cut=0, cov=25, num_samples=64, bcs=
     for c in coords_split:
         
         # Sample neighborhoods
-        samples = mvn.sample((num_samples, c.shape[2])).int().transpose(1,2) #sample separately for each site
+        samples = mvn.sample((num_samples, c.shape[2])).round().int().transpose(1,2) #sample separately for each site
         # samples = torch.cat([samples, samples*-1], dim=0).to(im.device) #mirror the samples to keep a zero mean
         c = samples + c
         

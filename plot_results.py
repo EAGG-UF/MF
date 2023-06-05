@@ -7,66 +7,18 @@ Created on Mon May 15 16:03:12 2023
 """
 
 
+
 import functions as fs
 import h5py 
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.io
 import pandas
-from scipy.stats import multivariate_normal
-import scipy as sp
+# from scipy.stats import multivariate_normal
+# import scipy as sp
 import shutil
-import torch
+# import torch
 # import scipy.io
-# import matplotlib
-# matplotlib.rc('text', usetex=True)
-# matplotlib.rcParams['text.latex.preamble']=r"\usepackage{amsmath}"
-
-
-
-
-#In the morning
-#Understand Joel's generalization
-#Fill in cutt off angle
-#Distribution divergence vs nss
-#Finish results
-
-
-I = np.zeros([4,4,4])
-I[0,0,0] = 1
-I[1,1,1] = 1
-I[2,2,2] = 1
-I[3,3,3] = 1
-
-x = np.array([2,3,4,5])[:,None]
-
-np.matmul(I,x).shape
-
-
-
-
-### TEST FOR PAPER
-ic, ea = fs.generate_circleIC(size=[512,512], r=200)
-cov = torch.Tensor([[50,0],[0,25]])
-ims = fs.run_mf(ic, ea, 1000, cut=0, cov=cov, num_samples=64, if_plot=False, if_save=False)
-    
-im = ims[-1,0].copy()
-im[-10:,:10] = 1
-
-plt.imshow(im)
-
-mean_arr = torch.zeros(2)
-mvn = torch.distributions.MultivariateNormal(mean_arr.to(device), cov.to(device))
-s = mvn.sample((1000,1)).int().cpu()
-
-
-plt.scatter(s[:,0,0], s[:,0,1])
-
-
-aaa = torch.zeros(60,60)
-aaa[s[:,0,0]+30, s[:,0,1]+30] = 1
-
-plt.imshow(aaa)
 
 
 
@@ -148,11 +100,8 @@ plt.show()
 
 for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
 
-    # with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(32)_cut(0).h5', 'r') as f:
-    #     grain_areas = f['sim0/grain_areas'][:]
-        
-    # with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
-    #     grain_areas = f['sim2/grain_areas'][:]
+    with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
+        grain_areas = f['sim2/grain_areas'][:]
     n = (grain_areas!=0).sum(1)
     j = np.argmin(np.abs(n-num_grains))
     a = grain_areas[j]
@@ -194,37 +143,6 @@ for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
     plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp, 'PF, $N_G$ - %d'%n_pf, 'Yadav 2018', 'Zollner 2016'], fontsize=7)
     plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_r_dist%d.png'%num_grains, bbox_inches='tight', dpi=300)
     plt.show()
-    
-    
-
-
-
-
-
-
-
-
-
-#Computtional speed and number of samples plot
-#Consistency and number of samples plot
-
-#Do the below plot instead of showing energy decrease over time (not immediately meaningful)
-#Find kldivergence between these vs nss (statistical quality)
-
-h_mf
-h_mcp
-h_pf
-h_yad
-h_zol
-
-
-
-
-
-
-
-
-
 
 
 
@@ -233,10 +151,7 @@ h_zol
 for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
     
     with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
-        grain_sides = f['sim0/grain_sides'][:]
-    
-    # with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
-    #     grain_sides = f['sim2/grain_sides'][:]
+        grain_sides = f['sim2/grain_sides'][:]
     n = (grain_sides!=0).sum(1)
     i = np.argmin(np.abs(n-num_grains))
     s = grain_sides[i][grain_sides[i]!=0]
@@ -614,220 +529,223 @@ plt.show()
 
 
 
-### Change in computational speed with number of samples #!!!
+### FPS vs nss #!!!
 ic, ea, _ = fs.voronoi2image([1024,1024], 4096)
 ma = fs.find_misorientation(ea, mem_max=10)
     
-nss = [2,4,8,16,32,64,128,256,512]
+nss = np.array([3,4,8,16,32,64,128,256,512])
+itr = [100,100,100,100,100,10,10,1,1]
 log = []
-for ns in nss: 
-    ims, runtime = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False, if_time=True)
-    log.append(runtime)
+for i, ns in enumerate(nss): 
+    ims, runtime = fs.run_mf(ic, ea, nsteps=itr[i], cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False, if_time=True)
+    log.append(runtime/itr[i])
+runtime = np.stack(log)
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[2,2], dpi=300)
 plt.rcParams['font.size'] = 8
-plt.plot(nss, log)
-plt.ylabel('Runtime (s)')
-plt.xlabel('Number of Samples Squared')
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/mf_runtime_vs_nss.png', bbox_inches='tight', dpi=300)
+plt.plot(nss, 1/runtime, '*-')
+plt.ylabel('FPS')
+plt.xlabel('$N_S$')
+plt.annotate('$N_S$: %d\nFPS: %.1f'%(nss[0], 1/runtime[0]), (nss[0]+50, 1/runtime[0]-80))
+plt.annotate('$N_S$: %d\nFPS: %.1f'%(nss[-1], 1/runtime[-1]), (nss[-1]-150, 1/runtime[-1]+40))
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/fps_vs_nss.png', bbox_inches='tight', dpi=300)
 plt.show()
 
 
 
-### Change in pixel consistency vs nss #!!!
+### Single step error vs nss #!!!
+var = [4]#[4,9,16,25,36] #all proportional along x axis
+nss = np.array([3,4,8,16,32,64,128,256,512])#.astype(float)
 
-ic, ea, _ = fs.voronoi2image([1024,1024], 4096)
-ma = fs.find_misorientation(ea, mem_max=10)
-
-plt.figure()
-legs = []
-var = [4,9,16,25,36]
-nss = np.array([2,4,8,16,32,64,128])#.astype(float)
-
-plt.figure(figsize=[3,2], dpi=300)
-plt.rcParams['font.size'] = 8
+log = []
 for v in var:
-    log = []
+    log0 = []
     for ns in nss:
         ims0 = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
         ims1 = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
-        log.append(1-(ims0[1]==ims1[1]).sum()/(1024**2))
-    
-    plt.plot(nss, log)
-    legs.append('Var=%d'%v)
-plt.ylabel('Ratio of pixels difference')
-plt.xlabel('Number of samples')
-plt.legend(legs)
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/mf_consistency_vs_nss.png', bbox_inches='tight', dpi=300)
+        log0.append(1-(ims0[1]==ims1[1]).sum()/(1024**2))
+    log.append(log0)
+loss = np.block(log).squeeze()
+
+plt.figure(figsize=[2,2], dpi=300)
+plt.rcParams['font.size'] = 8
+plt.plot(nss/v, loss, '*-')
+plt.ylabel('Mean $L0$ Loss')
+plt.xlabel('$N_S$/Variance')
+plt.ylim([0,.2])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/l0loss_vs_nss.png', bbox_inches='tight', dpi=300)
 plt.show()
 
 
 
-### Percentage edge pixels at 1000 grains steps vs nss #!!!
-
-device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-ic, ea, _ = fs.voronoi2image([1024,1024], 4096)
-ma = fs.find_misorientation(ea, mem_max=10)
-
-nss = [2,3,8,16,32,64]
+### Images vs nss #!!!
+nss = [3,8,16]
 log = []
 for ns in nss:
     ims = fs.run_mf(ic, ea, nsteps=100, cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False)
-    
     ng = np.array([len(np.unique(im)) for im in ims])
     i = np.argmin(np.abs(ng-1000))
+    log.append(ims[i,0])
     
-    im = ims[i]
-    imt = torch.from_numpy(im[None,].astype(float)).to(device)
-    ime = fs.num_diff_neighbors(imt, window_size=3, pad_mode='circular')
-    log.append((ime>0).sum().cpu().numpy()/(1024**2))
-    
-    # plt.imshow(ims[i,0]); plt.show()
+for i in range(len(nss)):    
+    plt.figure(figsize=[2,2], dpi=300)
+    plt.rcParams['font.size'] = 8
+    plt.imshow(log[i])
+    plt.title('$N_S$=%d'%nss[i])
+    plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/structure_ns%d.png'%nss[i], bbox_inches='tight', dpi=300)
+    plt.show()
 
-plt.figure(figsize=[3,2], dpi=300)
+
+
+### Distribution quality - statistical error vs nss #!!!
+
+# Normalized radius
+nss = [2,3,4,8,16,32,64]
+
+log = []
+log_h = []
+log_n = []
+for ns in nss:
+    
+    log0 = []
+    log_h0 = []
+    log_n0 = []
+    for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
+    
+        with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(%d)_cut(0).h5'%ns, 'r') as f:
+            grain_areas = f['sim0/grain_areas'][:]
+            if ns==64: grain_areas = f['sim2/grain_areas'][:]
+        n = (grain_areas!=0).sum(1)
+        j = np.argmin(np.abs(n-num_grains))
+        a = grain_areas[j]
+        r = np.sqrt(a[a!=0]/np.pi)
+        rn = r/np.mean(r)
+        
+        mat = scipy.io.loadmat('./data/previous_figures/RadiusDistPureTP2DNew.mat')
+        x_yad = mat['y1'][0]
+        h_yad = mat['RtotalFHD5'][0]
+        
+        x_zol, h_zol = np.loadtxt('./data/previous_figures/Results.csv', delimiter=',',skiprows=1).T
+        
+        x_match = x_yad
+        h_match = h_yad
+        df = np.diff(x_match)
+        e0 = np.array([x_match[0]-df[0]/2])
+        e1 = np.array([x_match[-1]+df[-1]/2])
+        tmp = x_match[:-1]+df/2
+        bins = np.concatenate([e0, tmp, e1])
+        h_mf, x_edges = np.histogram(rn, bins=bins, density=True)
+        x_mf = x_match
+        n_mf = len(rn)
+        
+        log_h0.append(h_mf)
+        log_n0.append(n_mf)
+        rmse = np.sqrt(np.sum((h_match-h_mf)**2))
+        log0.append(rmse)
+    
+    log.append(log0)
+    log_h.append(log_h0)
+    log_n.append(log_n0)
+        
+rmse = np.block(log)
+
+rmse_r = rmse
+log_r = log
+log_h_r = log_h
+log_n_r = log_n
+x_yad_r = x_yad
+h_yad_r = h_yad
+x_mf_r = x_mf
+
+
+# Number of sides
+log = []
+log_h = []
+log_n = []
+for ns in nss:
+    
+    log0 = []
+    log_h0 = []
+    log_n0 = []
+    for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
+    
+        with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(%d)_cut(0).h5'%ns, 'r') as f:
+            grain_sides = f['sim0/grain_sides'][:]
+            if ns==64: grain_sides = f['sim2/grain_sides'][:]
+        n = (grain_sides!=0).sum(1)
+        i = np.argmin(np.abs(n-num_grains))
+        s = grain_sides[i][grain_sides[i]!=0]
+        
+        mat = scipy.io.loadmat('./data/previous_figures_sides/FaceDistPureTP2DNew.mat')
+        x_yad = mat['y1'][0]
+        h_yad = mat['FtotalFHD5'][0]
+        
+        x_mas, h_mas = np.loadtxt('./data/previous_figures_sides/ResultsMasonLazar2DGTD.txt').T
+        
+        x_match = x_yad
+        h_match = h_yad
+        df = np.diff(x_match)
+        e0 = np.array([x_match[0]-df[0]/2])
+        e1 = np.array([x_match[-1]+df[-1]/2])
+        tmp = x_match[:-1]+df/2
+        bins = np.concatenate([e0, tmp, e1])
+        h_mf, x_edges = np.histogram(s, bins=bins, density=True)
+        x_mf = x_match
+        n_mf = len(s)
+        
+        log_h0.append(h_mf)
+        log_n0.append(n_mf)
+        rmse = np.sqrt(np.sum((h_match-h_mf)**2))
+        log0.append(rmse)
+    
+    log.append(log0)
+    log_h.append(log_h0)
+    log_n.append(log_n0)
+    
+rmse = np.block(log)
+
+
+# Plot rmse vs nss
+plt.figure(figsize=[2,2], dpi=300)
 plt.rcParams['font.size'] = 8
-plt.plot(nss, log)
-plt.ylabel('Ratio of pixels on boundary')
-plt.xlabel('Number of samples')
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/mf_boundary_vs_nss.png', bbox_inches='tight', dpi=300)
+plt.plot(nss, rmse_r.mean(1), '-')
+plt.plot(nss, rmse.mean(1), '--')
+plt.ylabel('RMSE')
+plt.xlabel('Number of Samples')
+plt.legend(['Normalized Radius', 'Number of Sides'], fontsize=7)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/rmse_vs_nss.png', bbox_inches='tight', dpi=300)
 plt.show()
 
 
-
-
-
-
-
-
-
-
-ns = 3
-ims = fs.run_mf(ic, ea, nsteps=500, cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False)
-plt.imshow(ims[0,0]); plt.show()
-
-
-### Number of boundary pixels per grain vs nss
-
-
-ns = 16
-v = 25
-
-ims = fs.run_mf(ic, ea, nsteps=100, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
-
-
-
-log = []
-for im in ims: 
-    log.append(len(np.unique(im)))
-ng = np.stack(log)
-
-device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-log = []
-for im in ims: 
-    imt = torch.from_numpy(im[None,].astype(float)).to(device)
-    ime = fs.num_diff_neighbors(imt, window_size=3, pad_mode='circular')
-    log.append((ime[0,0]>0).sum())
-pe = torch.stack(log).cpu().numpy()
-
-
-aaa = pe/ng
-r = np.sqrt(1024**2/ng)
-plt.plot(ng, pe)
-
-
-
-#
-#The STD of the grain growth speed goes down with larger number of samples (if you normalize the first sample to 1)
-
-log = []
-for ns in nss:
-    s, e = np.load('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep.npy'%ns)
-    log.append(e)
-
-
-tmp = np.stack(log)
-anstd = (tmp/tmp.max(0)).mean(1) #avg normalized std
-anstd = (tmp/tmp[0]).mean(1) #avg normalized std
-
-plt.plot(nss, anstd)
-plt.title('')
-plt.ylabel('STD of slope of $<R>^2$')
-plt.xlabel('Number of samples')
-
-plt.plot((tmp/tmp.max(0)))
-
-
-#Plot
-plt.figure()
-legend = []
-log = []
-loge = []
-logp = []
-for ns in nss:
-    s, e = np.load('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep.npy'%ns)
-    log.append(s)
-    loge.append(e)
-    x = np.arange(len(s))
-    # p = np.polyfit(covs, s, 1)
-    
-    p = np.sum(np.linalg.pinv(np.array(covs)[:,None])*s)
-    logp.append(p)
-    
-    # print('Slope: %f \nIntercept: %f'%(p[0], p[1]))
-    # plt.errorbar(covs[:len(s)], s, e, marker='.', ms=20, capsize=3) 
-    
-    plt.errorbar(covs[:len(s)], s, 2*e, marker='.', ms=2, capsize=3, linestyle='') 
-    # legend.append('Ns: %d, Slope: %.3f, Var=0: %.3f'%(ns,p[0],p[1]))
-    legend.append('Ns: %d, Slope: %.3f'%(ns,p))
-plt.ylabel('Slope of $<R>^2$')
-plt.xlabel('Variance')
-plt.legend(legend)
-# plt.legend(['Slope: %f'%p[0]])
-plt.show()
-
-bbb = np.stack(loge)
-ccc = (bbb/bbb.max(0)).mean(1)
-
-plt.plot(nss, ccc)
-plt.title('Neighborhood variance of 4-100\nAvg of Normalized')
-plt.ylabel('STD of slope of $<R>^2$')
-plt.xlabel('Number of samples')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#errors self correct, but you always have more errors
-
-
-
-with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
-    ic = torch.from_numpy(f['sim2/ims_id'][0,0].astype(float))
-    ea = torch.from_numpy(f['sim2/euler_angles'][:].astype(float))
-    ma = torch.from_numpy(f['sim2/miso_array'][:].astype(float))
-    
-ims = fs.run_mf(ic, ea, nsteps=1000, cut=0, cov=25, num_samples=3, miso_array=ma, if_save=True)
-fs.compute_grain_stats('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(3)_cut(0).h5')
-
-
-plt.imshow(ims[-1,0])
-
-
-
-
-
-
-
-
+# Plot r distributions
+for i in [1,3,4]:
+    plt.figure(figsize=[2,1], dpi=300)
+    plt.rcParams['font.size'] = 8
+    plt.plot(x_mf_r, log_h_r[i][0], '-')
+    plt.plot(x_yad_r, h_yad_r, '*', ms=5)
+    plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
+    plt.xlabel('Normalized Radius')
+    plt.ylabel('Frequency')
+    plt.xlim([0,3])
+    plt.ylim([0,1.2])
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/r_dist_comp_ns%d.png'%nss[i], bbox_inches='tight', dpi=300)
+    plt.show()
+   
+   
+# Plot s distributions
+for i in [1,3,4]:
+    plt.figure(figsize=[2,1], dpi=300)
+    plt.rcParams['font.size'] = 8
+    plt.plot(x_mf, log_h[i][0], '-')
+    plt.plot(x_yad, h_yad, '*', ms=5)
+    plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
+    plt.xlabel('Number of sides')
+    plt.ylabel('Frequency')
+    plt.xlim([0,15])
+    plt.ylim([0,0.4])
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/s_dist_comp_ns%d.png'%nss[i], bbox_inches='tight', dpi=300)
+    plt.show()
 
 
 
@@ -932,17 +850,7 @@ plt.show()
 
 
 
-
-
-
-
-### Consistency vs ns
-
-
-
-
-
-
+### Zip all figures for easy download
 shutil.make_archive('../tmp', 'zip', '../tmp')
 
 
@@ -958,7 +866,103 @@ shutil.make_archive('../tmp', 'zip', '../tmp')
 
 
 
-### Apendix 
+### Apendix  #!!!
+
+
+# with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
+#     ic = torch.from_numpy(f['sim2/ims_id'][0,0].astype(float))
+#     ea = torch.from_numpy(f['sim2/euler_angles'][:].astype(float))
+#     ma = torch.from_numpy(f['sim2/miso_array'][:].astype(float))
+    
+# ims = fs.run_mf(ic, ea, nsteps=1000, cut=0, cov=25, num_samples=3, miso_array=ma, if_save=True)
+# fs.compute_grain_stats('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(3)_cut(0).h5')
+
+
+# ### Percentage edge pixels at 1000 grains steps vs nss
+
+# device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# ic, ea, _ = fs.voronoi2image([1024,1024], 4096)
+# ma = fs.find_misorientation(ea, mem_max=10)
+
+# nss = [2,3,8,16,32,64]
+# log = []
+# for ns in nss:
+#     ims = fs.run_mf(ic, ea, nsteps=100, cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False)
+    
+#     ng = np.array([len(np.unique(im)) for im in ims])
+#     i = np.argmin(np.abs(ng-1000))
+    
+#     im = ims[i]
+#     imt = torch.from_numpy(im[None,].astype(float)).to(device)
+#     ime = fs.num_diff_neighbors(imt, window_size=3, pad_mode='circular')
+#     log.append((ime>0).sum().cpu().numpy()/(1024**2))
+    
+#     # plt.imshow(ims[i,0]); plt.show()
+
+# plt.figure(figsize=[3,2], dpi=300)
+# plt.rcParams['font.size'] = 8
+# plt.plot(nss, log)
+# plt.ylabel('Ratio of pixels on boundary')
+# plt.xlabel('Number of samples')
+# plt.savefig('/blue/joel.harley/joseph.melville/tmp/mf_boundary_vs_nss.png', bbox_inches='tight', dpi=300)
+# plt.show()
+
+
+# ### The STD of the grain growth speed goes down with larger number of samples (if you normalize the first sample to 1)
+
+# log = []
+# for ns in nss:
+#     s, e = np.load('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep.npy'%ns)
+#     log.append(e)
+
+
+# tmp = np.stack(log)
+# anstd = (tmp/tmp.max(0)).mean(1) #avg normalized std
+# anstd = (tmp/tmp[0]).mean(1) #avg normalized std
+
+# plt.plot(nss, anstd)
+# plt.title('')
+# plt.ylabel('STD of slope of $<R>^2$')
+# plt.xlabel('Number of samples')
+
+# plt.plot((tmp/tmp.max(0)))
+
+
+# #Plot
+# plt.figure()
+# legend = []
+# log = []
+# loge = []
+# logp = []
+# for ns in nss:
+#     s, e = np.load('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep.npy'%ns)
+#     log.append(s)
+#     loge.append(e)
+#     x = np.arange(len(s))
+#     # p = np.polyfit(covs, s, 1)
+    
+#     p = np.sum(np.linalg.pinv(np.array(covs)[:,None])*s)
+#     logp.append(p)
+    
+#     # print('Slope: %f \nIntercept: %f'%(p[0], p[1]))
+#     # plt.errorbar(covs[:len(s)], s, e, marker='.', ms=20, capsize=3) 
+    
+#     plt.errorbar(covs[:len(s)], s, 2*e, marker='.', ms=2, capsize=3, linestyle='') 
+#     # legend.append('Ns: %d, Slope: %.3f, Var=0: %.3f'%(ns,p[0],p[1]))
+#     legend.append('Ns: %d, Slope: %.3f'%(ns,p))
+# plt.ylabel('Slope of $<R>^2$')
+# plt.xlabel('Variance')
+# plt.legend(legend)
+# # plt.legend(['Slope: %f'%p[0]])
+# plt.show()
+
+# bbb = np.stack(loge)
+# ccc = (bbb/bbb.max(0)).mean(1)
+
+# plt.plot(nss, ccc)
+# plt.title('Neighborhood variance of 4-100\nAvg of Normalized')
+# plt.ylabel('STD of slope of $<R>^2$')
+# plt.xlabel('Number of samples')
 
 
 
@@ -1097,7 +1101,7 @@ shutil.make_archive('../tmp', 'zip', '../tmp')
 
 
 
-# ### Number of samples vs slope of <R>^2 #!!!
+# ### Number of samples vs slope of <R>^2 
 
 # nss = [4,8,16,32,64,128,256,512] #number of samples
 # var = 25
@@ -1196,7 +1200,7 @@ shutil.make_archive('../tmp', 'zip', '../tmp')
 
 
 
-# ### Discrete gaussian and resulting square grains #!!!
+# ### Discrete gaussian and resulting square grains 
 
 # s = 16 #variance
 
