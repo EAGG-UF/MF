@@ -2106,72 +2106,72 @@ def compute_grain_stats(hps, gps='last', device=device):
                 g['grain_sides_avg'] = grain_sides_avg
                 print('Calculated: grain_sides_avg')
             
-            # Find misorientation images
-            if 'ims_miso' not in g.keys():
-                args = [miso_matrix[None,]]
-                func = neighborhood_miso
-                ims_miso = iterate_function(d, func, args)[:,0]
-                g['ims_miso'] = ims_miso
-                print('Calculated: ims_miso')
-            else: ims_miso = None
+            # # Find misorientation images
+            # if 'ims_miso' not in g.keys():
+            #     args = [miso_matrix[None,]]
+            #     func = neighborhood_miso
+            #     ims_miso = iterate_function(d, func, args)[:,0]
+            #     g['ims_miso'] = ims_miso
+            #     print('Calculated: ims_miso')
+            # else: ims_miso = None
                 
-            # Find average misorientation per boundary pixel
-            if 'ims_miso_avg' not in g.keys():
-                if np.all(ims_miso==None): ims_miso = g['ims_miso']
-                func = mean_wo_zeros
-                ims_miso_avg = iterate_function(ims_miso, func, args=[])
-                g['ims_miso_avg'] = ims_miso_avg
-                print('Calculated: ims_miso_avg')
+            # # Find average misorientation per boundary pixel
+            # if 'ims_miso_avg' not in g.keys():
+            #     if np.all(ims_miso==None): ims_miso = g['ims_miso']
+            #     func = mean_wo_zeros
+            #     ims_miso_avg = iterate_function(ims_miso, func, args=[])
+            #     g['ims_miso_avg'] = ims_miso_avg
+            #     print('Calculated: ims_miso_avg')
             
-            # Find misorientation images using the SPPARKS method
-            if 'ims_miso_spparks' not in g.keys():
-                args = [miso_matrix[None,]]
-                func = neighborhood_miso_spparks
-                ims_miso_spparks = iterate_function(d, func, args)[:,0]
-                g['ims_miso_spparks'] = ims_miso_spparks
-                print('Calculated: ims_miso_spparks')
-            else: ims_miso_spparks = None
+            # # Find misorientation images using the SPPARKS method
+            # if 'ims_miso_spparks' not in g.keys():
+            #     args = [miso_matrix[None,]]
+            #     func = neighborhood_miso_spparks
+            #     ims_miso_spparks = iterate_function(d, func, args)[:,0]
+            #     g['ims_miso_spparks'] = ims_miso_spparks
+            #     print('Calculated: ims_miso_spparks')
+            # else: ims_miso_spparks = None
                 
-            # Find average misorientation per boundary pixel using the SPPARKS method
-            if 'ims_miso_spparks_avg' not in g.keys():
-                if np.all(ims_miso_spparks==None): ims_miso_spparks = g['ims_miso_spparks']
-                func = mean_wo_zeros
-                ims_miso_spparks_avg = iterate_function(ims_miso_spparks, func, args=[])
-                g['ims_miso_spparks_avg'] = ims_miso_spparks_avg
-                print('Calculated: ims_miso_spparks_avg')
+            # # Find average misorientation per boundary pixel using the SPPARKS method
+            # if 'ims_miso_spparks_avg' not in g.keys():
+            #     if np.all(ims_miso_spparks==None): ims_miso_spparks = g['ims_miso_spparks']
+            #     func = mean_wo_zeros
+            #     ims_miso_spparks_avg = iterate_function(ims_miso_spparks, func, args=[])
+            #     g['ims_miso_spparks_avg'] = ims_miso_spparks_avg
+            #     print('Calculated: ims_miso_spparks_avg')
                 
-            # Find dihedral angle standard deviation
-            if 'dihedral_std' not in g.keys():
-                func = find_dihedral_stats
-                dihedral_std = iterate_function(d, func)
-                g['dihedral_std'] = dihedral_std
-                print('Calculated: dihedral_std')
+            # # Find dihedral angle standard deviation
+            # if 'dihedral_std' not in g.keys():
+            #     func = find_dihedral_stats
+            #     dihedral_std = iterate_function(d, func)
+            #     g['dihedral_std'] = dihedral_std
+            #     print('Calculated: dihedral_std')
             
-            # # Find grain aspect ratios
-            # if 'aspects' not in g.keys():
-            #     args = [max_id]
-            #     func = find_aspect_ratios
-            #     aspects = iterate_function(d, func, args)
-            #     g['aspects'] = aspects
+            # # # Find grain aspect ratios
+            # # if 'aspects' not in g.keys():
+            # #     args = [max_id]
+            # #     func = find_aspect_ratios
+            # #     aspects = iterate_function(d, func, args)
+            # #     g['aspects'] = aspects
             
-            # # Find inclination of boundary pixels
-            # if 'ims_inclination' not in g.keys():
-            #     func = fs2.find_inclination
-            #     ims_inclination = fs2.iterate_function(d[0:1,], func, args=[])[:,0]
-            #     g['ims_inclination'] = ims_inclination
+            # # # Find inclination of boundary pixels
+            # # if 'ims_inclination' not in g.keys():
+            # #     func = fs2.find_inclination
+            # #     ims_inclination = fs2.iterate_function(d[0:1,], func, args=[])[:,0]
+            # #     g['ims_inclination'] = ims_inclination
             
-            # # Setup arguments
-            # ea = g['euler_angles'][:]
-            # ims_inclination = g['ims_inclination'][:]
+            # # # Setup arguments
+            # # ea = g['euler_angles'][:]
+            # # ims_inclination = g['ims_inclination'][:]
             
-            # # Find angle between inclination and orientation at each boundary pixel
-            # if 'ims_inc_angle' not in g.keys():
-            #     args = [ea, ims_inclination]
-            #     func = find_inclination_orientation_angle
-            #     ims_inc_angle = iterate_function(d, func, args)[:,0]
-            #     g['ims_inc_angle'] = ims_inc_angle
+            # # # Find angle between inclination and orientation at each boundary pixel
+            # # if 'ims_inc_angle' not in g.keys():
+            # #     args = [ea, ims_inclination]
+            # #     func = find_inclination_orientation_angle
+            # #     ims_inc_angle = iterate_function(d, func, args)[:,0]
+            # #     g['ims_inc_angle'] = ims_inc_angle
             
-            #curvature
+            # #curvature
 
 
 def make_videos(hps, gps='last'):

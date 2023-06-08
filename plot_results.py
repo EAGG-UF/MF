@@ -22,6 +22,20 @@ import shutil
 
 
 
+w=2; h=2
+sw=3; sh=2
+if_leg = True
+
+def export_legend(legend, filename="legend.png", expand=[-5,-5,5,5]):
+    fig  = legend.figure
+    fig.canvas.draw()
+    bbox  = legend.get_window_extent()
+    bbox = bbox.from_extents(*(bbox.extents + np.array(expand)))
+    bbox = bbox.transformed(fig.dpi_scale_trans.inverted())
+    fig.savefig(filename, dpi="figure", bbox_inches=bbox)
+
+
+
 ### 2D isotropic <R>^2 vs time, number of grains vs time (MF, SPPARKS, PF) #!!!
 
 mat = scipy.io.loadmat('./data/CSV.mat')
@@ -60,15 +74,15 @@ scale = p/p_pf
 t_mcp = np.arange(si)*scale
 ng_mcp = ng[:si]
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(t_mf, r2_mf*1e-12, '-')
 plt.plot(t_mcp, r2_mcp*1e-12, '--')
 plt.plot(t_pf ,r2_pf*1e-12, '-.')
 plt.xlabel('Time (s)')
 plt.ylabel('$<R>^2$ ($m^2$)')
-plt.legend(['MF','MCP','PF'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_r2_vs_time.png', bbox_inches='tight', dpi=300)
+if if_leg: plt.legend(['MF','MCP','PF'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_r2_vs_time.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -83,15 +97,15 @@ with h5py.File('./data/spparks_sz(2400x2400)_ng(20000)_nsteps(1600)_freq(1.0)_kt
 
 gsa_pf = pandas.read_csv('./data/pf/Kristien Everett - grain_neighbors_stats Case4_hd.csv').values[:,0]
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(t_mf, gsa_mf[:len(t_mf)], '-', linewidth=1, alpha=1)
 plt.plot(t_mcp, gsa_mcp[:len(t_mcp)], '--', linewidth=1, alpha=1)
 plt.plot(t_pf, gsa_pf[:len(t_pf)], '-.', linewidth=1, alpha=1)
 plt.xlabel('Time (s)')
-plt.ylabel('Avg number of sides')
-plt.legend(['MF','MCP','PF'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_num_sides_vs_time.png', bbox_inches='tight', dpi=300)
+plt.ylabel('Avg Number \nof Sides')
+if if_leg: plt.legend(['MF','MCP','PF'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_num_sides_vs_time.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -129,19 +143,19 @@ for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
     
     x_zol, h_zol = np.loadtxt('./data/previous_figures/Results.csv', delimiter=',',skiprows=1).T
     
-    plt.figure(figsize=[3,2], dpi=300)
+    plt.figure(figsize=[sw,sh], dpi=600)
     plt.rcParams['font.size'] = 8
     plt.plot(x_mf, h_mf, '-')
     plt.plot(x_mcp, h_mcp, '--')
     plt.plot(x_pf, h_pf, '-.')
-    plt.plot(x_yad, h_yad, '*', ms = 5)
-    plt.plot(x_zol, h_zol, 'd', ms=5)
+    plt.plot(x_yad, h_yad, '*', ms = 3)
+    plt.plot(x_zol, h_zol, 'd', ms = 3)
     plt.xlabel('$R/<R>$ - Normalized Radius')
     plt.ylabel('Frequency')
     plt.xlim([0,3])
     plt.ylim([0,1.2])
-    plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp, 'PF, $N_G$ - %d'%n_pf, 'Yadav 2018', 'Zollner 2016'], fontsize=7)
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_r_dist%d.png'%num_grains, bbox_inches='tight', dpi=300)
+    if if_leg: plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp, 'PF, $N_G$ - %d'%n_pf, 'Yadav 2018', 'Zollner 2016'], fontsize=7)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_r_dist%d.png'%num_grains, bbox_inches='tight', dpi=600)
     plt.show()
 
 
@@ -178,20 +192,32 @@ for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
     
     x_mas, h_mas = np.loadtxt('./data/previous_figures_sides/ResultsMasonLazar2DGTD.txt').T
     
-    plt.figure(figsize=[3,2], dpi=300)
+    plt.figure(figsize=[sw,sh], dpi=600)
     plt.rcParams['font.size'] = 8
     plt.plot(x_mf, h_mf, '-')
     plt.plot(x_mcp, h_mcp, '--')
     plt.plot(x_pf, h_pf, '-.')
-    plt.plot(x_yad, h_yad, '*', ms=5)
-    plt.plot(x_mas, h_mas, 'd', ms=5)
-    plt.xlabel('Number of sides')
+    plt.plot(x_yad, h_yad, '*', ms=4)
+    plt.plot(x_mas, h_mas, '^C6', ms=3)
+    plt.xlabel('Number of Sides')
     plt.ylabel('Frequency')
     plt.xlim([0,15])
     plt.ylim([0,0.4])
-    plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp, 'PF, $N_G$ - %d'%n_pf, 'Yadav 2018', 'Masson 2015'], fontsize=7)
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_num_sides_dist%d.png'%num_grains, bbox_inches='tight', dpi=300)
+    if if_leg: plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp, 'PF, $N_G$ - %d'%n_pf, 'Yadav 2018', 'Masson 2015'], fontsize=7)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_num_sides_dist%d.png'%num_grains, bbox_inches='tight', dpi=600)
     plt.show()
+
+plt.figure(figsize=[2,1], dpi=600)
+plt.rcParams['font.size'] = 8
+plt.plot(x_mf, h_mf, '-')
+plt.plot(x_mcp, h_mcp, '--')
+plt.plot(x_pf, h_pf, '-.')
+plt.plot(x_yad, h_yad, '*', ms = 5)
+plt.plot(x_zol, h_zol, 'd', ms = 5)
+plt.plot(x_mas, h_mas, '^C6', ms = 5)
+legend = plt.legend(['MF', 'MCP', 'PF', 'Yadav 2018', 'Zollner 2016', 'Masson 2015'], bbox_to_anchor=[1,1,1,1])
+export_legend(legend, filename='../tmp/2d_stats_legend.png')
+plt.show()
     
     
     
@@ -207,8 +233,8 @@ with h5py.File('./data/32c512grs512stsPkT066_img.hdf5', 'r') as f:
     ims_mcp = f['images'][:]
 ng_mcp = np.array([len(np.unique(im))for im in ims_mcp])
 
-plt.figure(figsize=[6.5,3], dpi=300)
-# plt.rcParams['font.size'] = 8
+plt.figure(figsize=[6.5,3], dpi=600)
+plt.rcParams['font.size'] = 8
 for i in range(len(num_grains)):
     
     j = np.argmin(np.abs(ng_mf-num_grains[i]))
@@ -226,17 +252,17 @@ for i in range(len(num_grains)):
     # im_pf = ims[1]
     
     plt.subplot(2,4,1+i)
-    plt.imshow(im_mf)
+    plt.imshow(im_mf, interpolation='none')
     plt.title('$N_G$=%d'%len(np.unique(im_mf)), fontsize=8)
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
     if i==0: plt.ylabel('MF', fontsize=8)
     plt.subplot(2,4,5+i)
-    plt.imshow(im_mcp)
+    plt.imshow(im_mcp, interpolation='none')
     # plt.title('$N_G$=%d'%len(np.unique(im_mcp)))
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
     if i==0: plt.ylabel('MCP', fontsize=8)
-    # plt.imshow(np.fliplr(im_pf))
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_comp.png', bbox_inches='tight', dpi=300)
+    # plt.imshow(np.fliplr(im_pf), interpolation='none')
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_comp.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -258,26 +284,35 @@ with h5py.File('./data/mf_sz(1024x1024)_ng(4096)_nsteps(1000)_cov(25)_numnei(64)
 # np.argmin(np.abs(ng25-4096*0.05))
 x_cut = 420
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(msa0[:x_cut])
-plt.plot(msa25[:x_cut],'--')
+plt.plot(msa25[:x_cut],'--',linewidth=1)
 plt.title('')
-plt.xlabel('Number of frames')
-plt.ylabel('Avg boundary misorientation')
-plt.legend(['Cutoff angle = 0','Cutoff angle = 25'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_avg_miso.png', bbox_inches='tight', dpi=300)
+plt.xlabel('Number of Frames')
+plt.ylabel('Avg Boundary \nMisorientation')
+if if_leg: plt.legend(['Isotropic','Anisotropic'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_avg_miso.png', bbox_inches='tight', dpi=600)
 plt.show()
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
+plt.rcParams['font.size'] = 8
+plt.plot(das0[:x_cut])
+plt.plot(das25[:x_cut],'--',linewidth=1)
+plt.title('')
+plt.xlabel('Number of Frames')
+plt.ylabel('Dihedral \nAngle STD')
+if if_leg: plt.legend(['Isotropic','Anisotropic'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_dihedral.png', bbox_inches='tight', dpi=600)
+plt.show()
+
+plt.figure(figsize=[3,2], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(das0[:x_cut])
 plt.plot(das25[:x_cut],'--')
-plt.title('')
-plt.xlabel('Number of frames')
-plt.ylabel('Dihedral angle STD')
-plt.legend(['Cutoff angle = 0','Cutoff angle = 25'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/2d_dihedral.png', bbox_inches='tight', dpi=300)
+legend = plt.legend(['Isotropic','Anisotropic'], bbox_to_anchor=[1,1,1,1])
+if if_leg: legend = plt.legend(['MF', 'MCP', 'PF', 'Yadav 2018', 'Masson 2015'], bbox_to_anchor=[1,1,1,1])
+export_legend(legend, filename='../tmp/2d_ani_stats_legend.png')
 plt.show()
 
 
@@ -306,16 +341,16 @@ scale = p/p_mf
 t_mcp = np.arange(len(r2_mcp))*scale
 ng_mcp = ng
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(t_mf, r2_mf)
 plt.plot(t_mcp, r2_mcp,'--')
-plt.xlabel('Time (unitless)')
+plt.xlabel('Time (Unitless)')
 plt.ylabel('$<R>^2$ (Pixels)')
 plt.xlim([0,t_mf[-1]])
 plt.ylim([0,100])
-plt.legend(['MF','MCP'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_r2_vs_time.png', bbox_inches='tight', dpi=300)
+if if_leg: plt.legend(['MF','MCP'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_r2_vs_time.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -327,15 +362,15 @@ with h5py.File('./data/mf_sz(128x128x128)_ng(8192)_nsteps(1000)_cov(4)_numnei(64
     
 gsa_mcp = np.load('./data/spparks_grain_sides_avg_128p3_8192.npy')
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(t_mf, gsa_mf[:len(t_mf)])
 plt.plot(t_mcp, gsa_mcp,'--')
 plt.xlim([0, t_mf[-1]])
-plt.xlabel('Time (unitless)')
-plt.ylabel('Avg number of sides')
-plt.legend(['MF','MCP'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_num_sides_vs_time.png', bbox_inches='tight', dpi=300)
+plt.xlabel('Time (Unitless)')
+plt.ylabel('Avg Number \nof Sides')
+if if_leg: plt.legend(['MF','MCP'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_num_sides_vs_time.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -365,14 +400,14 @@ for num_grains in [2000, 1500, 1000]:
     x_mcp = x_edges[:-1]+np.diff(x_edges)/2
     n_mcp = len(rn)
     
-    plt.figure(figsize=[3,2], dpi=300)
+    plt.figure(figsize=[sw,sh], dpi=600)
     plt.rcParams['font.size'] = 8
     plt.plot(x_mf, h_mf, '-')
     plt.plot(x_mcp, h_mcp, '--')
     plt.xlabel('$R/<R>$ - Normalized Radius')
     plt.ylabel('Frequency')
-    plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp], fontsize=7)
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_r_dist%d.png'%num_grains, bbox_inches='tight', dpi=300)
+    if if_leg: plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp], fontsize=7)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_r_dist%d.png'%num_grains, bbox_inches='tight', dpi=600)
     plt.show()
 
 
@@ -400,14 +435,14 @@ for num_grains in [2000, 1500, 1000]:
     x_mcp = x_edges[:-1]+np.diff(x_edges)/2
     n_mcp = len(s)
     
-    plt.figure(figsize=[3,2], dpi=300)
+    plt.figure(figsize=[sw,sh], dpi=600)
     plt.rcParams['font.size'] = 8
     plt.plot(x_mf, h_mf, '-')
     plt.plot(x_mcp, h_mcp, '--')
-    plt.xlabel('Number of sides')
+    plt.xlabel('Number of Sides')
     plt.ylabel('Frequency')
-    plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp], fontsize=7)
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_num_sides_dist%d.png'%num_grains, bbox_inches='tight', dpi=300)
+    if if_leg: plt.legend(['MF, $N_G$ - %d'%n_mf, 'MCP, $N_G$ - %d'%n_mcp], fontsize=7)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_num_sides_dist%d.png'%num_grains, bbox_inches='tight', dpi=600)
     plt.show()
 
 
@@ -427,18 +462,19 @@ grain_sides = np.load('./data/spparks_grain_sides_128p3_8192.npy')
 ng_mcp = (grain_sides!=0).sum(1)[si_mcp]
 ims_mcp = np.load('./data/spparks_ims_id_128p3_8192.npy')[:,64]
 
-plt.figure(figsize=[6.5,3], dpi=300)
+plt.figure(figsize=[6.5,3], dpi=600)
+plt.rcParams['font.size'] = 8
 for i in range(len(num_grains)):
     plt.subplot(2, 4, 1+i)
-    plt.imshow(ims_mf[i])
+    plt.imshow(ims_mf[i], interpolation='none')
     plt.title('$N_G$=%d'%ng_mf[i], fontsize=8)
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
     if i==0: plt.ylabel('MF', fontsize=8)
     plt.subplot(2, 4, 5+i)
-    plt.imshow(ims_mcp[i])
+    plt.imshow(ims_mcp[i], interpolation='none')
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
     if i==0: plt.ylabel('MCP', fontsize=8)
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_comp.png', bbox_inches='tight', dpi=300)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_comp.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -460,26 +496,26 @@ with h5py.File('./data/mf_sz(128x128x128)_ng(8192)_nsteps(1000)_cov(4)_numnei(64
     ng25 = (f['sim0/grain_areas'][:]!=0).sum(1)
 x_cut = 150
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(msa0[:x_cut])
 plt.plot(msa25[:x_cut],'--')
 plt.title('')
-plt.xlabel('Number of frames')
-plt.ylabel('Avg boundary misorientation')
-plt.legend(['Cutoff angle = 0','Cutoff angle = 25'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_avg_miso.png', bbox_inches='tight', dpi=300)
+plt.xlabel('Number of Frames')
+plt.ylabel('Avg Boundary \nMisorientation')
+if if_leg: plt.legend(['Isotropic','Anisotropic'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_avg_miso.png', bbox_inches='tight', dpi=600)
 plt.show()
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[sw,sh], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(das0[:x_cut])
 plt.plot(das25[:x_cut],'--')
 plt.title('')
-plt.xlabel('Number of frames')
-plt.ylabel('Dihedral angle STD')
-plt.legend(['Cutoff angle = 0','Cutoff angle = 25'])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_dihedral.png', bbox_inches='tight', dpi=300)
+plt.xlabel('Number of Frames')
+plt.ylabel('Dihedral \nAngle STD')
+if if_leg: plt.legend(['Isotropic','Anisotropic'])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/3d_dihedral.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -492,6 +528,7 @@ covs = stds**2
 
 # ng = 2**14
 # ic, ea, _ = fs.voronoi2image([2048, 2048], ng)
+# ma = fs.find_misorientation(ea, mem_max=10)
 
 # for ns in nss: #(10 hrs runtime)
 #     log = []
@@ -499,7 +536,7 @@ covs = stds**2
 #         print(cov)
 #         log_p = []
 #         for i in range(30):
-#             ims = fs.run_mf(ic, ea, nsteps=300, cut=0, cov=int(cov), num_samples=ns, if_save=False)
+#             ims = fs.run_mf(ic, ea, nsteps=300, cut=0, cov=int(cov), num_samples=ns, miso_array=ma, if_save=False)
 #             a = fs.iterate_function(ims, fs.find_grain_areas, [ng-1])
 #             r = np.sqrt(a/np.pi)
 #             n = (r!=0).sum(1)
@@ -516,92 +553,128 @@ covs = stds**2
 #         e = np.block(log).std(1)
 #         plt.errorbar(covs[:len(s)], s, e, marker='.', ms=20, capsize=3) 
     
-#     # np.save('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep'%ns, np.stack([s,e]))
+    # np.save('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep'%ns, np.stack([s,e]))
 
-plt.figure(figsize=[3,2], dpi=300)
+log_s = []
+log_e = []
+for ns in nss:
+    s, e = np.load('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains %dns 30rep.npy'%ns)
+    log_s.append(s)
+    log_e.append(e)
+    # log.append((s[-1]-s[0])/(covs[-1]-covs[0]))
+    # plt.errorbar(covs[:len(s)], s, 2*e, marker='.', ms=2, capsize=3, linestyle='-') 
+s_new = np.stack(log_s).mean(0) #find the mean for all nss
+e_all = np.stack(log_e)
+e_new = np.sqrt((e_all**2*29).sum(0)/(30*e_all.shape[1]-1)) #find the std for all nss
+
+plt.figure(figsize=[w,h], dpi=600)
 plt.rcParams['font.size'] = 8
-s, e = np.load('./data/Slope and error of <R>2 vs var - 2048x2048 16384grains 64ns 30rep.npy')
-plt.errorbar(covs[:len(s)], s, 2*e, marker='.', ms=2, capsize=3, linestyle='-') 
+# plt.errorbar(covs[:len(s)], s, 2*e, marker='.', ms=2, capsize=3, linestyle='-') 
+plt.errorbar(covs[:len(s)], s_new, 2*e_new, marker='.', ms=2, capsize=3, linestyle='-')
 plt.ylabel('Slope of $<R>^2$')
 plt.xlabel('Variance')
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/mf_var_vs_growth_speed.png', bbox_inches='tight', dpi=300)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/var_vs_growth_speed.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
 
-### FPS vs nss #!!!
-ic, ea, _ = fs.voronoi2image([1024,1024], 4096)
-ma = fs.find_misorientation(ea, mem_max=10)
+### Runtime vs nss #!!!
+# ic, ea, _ = fs.voronoi2image([1024,1024], 4096)
+# ma = fs.find_misorientation(ea, mem_max=10)
     
 nss = np.array([3,4,8,16,32,64,128,256,512])
-itr = [100,100,100,100,100,10,10,1,1]
-log = []
-for i, ns in enumerate(nss): 
-    ims, runtime = fs.run_mf(ic, ea, nsteps=itr[i], cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False, if_time=True)
-    log.append(runtime/itr[i])
-runtime = np.stack(log)
+# itr = [100,100,100,100,100,10,10,1,1]
+# log = []
+# for i, ns in enumerate(nss): 
+#     ims, runtime = fs.run_mf(ic, ea, nsteps=itr[i], cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False, if_time=True)
+#     log.append(runtime/itr[i])
+# runtime = np.stack(log)
+# np.save('./data/runtime_vs_nss', runtime)
+runtime = np.load('./data/runtime_vs_nss.npy')
 
-plt.figure(figsize=[2,2], dpi=300)
+# plt.figure(figsize=[2,2], dpi=600)
+# plt.rcParams['font.size'] = 8
+# plt.plot(nss, 1/runtime, '*-')
+# plt.ylabel('FPS')
+# plt.xlabel('$N_S$')
+# plt.annotate('$N_S$: %d\nFPS: %.1f'%(nss[0], 1/runtime[0]), (nss[0]+50, 1/runtime[0]-80))
+# plt.annotate('$N_S$: %d\nFPS: %.1f'%(nss[-1], 1/runtime[-1]), (nss[-1]-150, 1/runtime[-1]+40))
+# plt.savefig('/blue/joel.harley/joseph.melville/tmp/fps_vs_nss.png', bbox_inches='tight', dpi=600)
+# plt.show()
+
+p = np.sum(np.linalg.pinv(np.array(nss**2)[:,None])*runtime)
+runtime_fit = p*nss**2
+r2 = 1-((runtime-runtime_fit)**2).sum()/((runtime-runtime.mean())**2).sum()
+
+plt.figure(figsize=[w,h], dpi=600)
 plt.rcParams['font.size'] = 8
-plt.plot(nss, 1/runtime, '*-')
-plt.ylabel('FPS')
+plt.plot(nss, runtime, '*-')
+# plt.plot(nss, runtime_fit, '*-')
+plt.ylabel('Runtime (s)')
 plt.xlabel('$N_S$')
-plt.annotate('$N_S$: %d\nFPS: %.1f'%(nss[0], 1/runtime[0]), (nss[0]+50, 1/runtime[0]-80))
-plt.annotate('$N_S$: %d\nFPS: %.1f'%(nss[-1], 1/runtime[-1]), (nss[-1]-150, 1/runtime[-1]+40))
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/fps_vs_nss.png', bbox_inches='tight', dpi=300)
+# plt.legend(['Fit $y = ax^2$ \n$1-R^2$: %1.1e'%(1-r2)], fontsize=7, loc=2)
+plt.legend(['Fit $y = (%1.1e)x^2$ \n1-$R^2$: %1.1e'%(p, 1-r2)], fontsize=7, loc=2)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/runtime_vs_nss.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
 
 ### Single step error vs nss #!!!
-var = [4]#[4,9,16,25,36] #all proportional along x axis
+var = [25]#[4,9,16,25,36] #all proportional along x axis
 nss = np.array([3,4,8,16,32,64,128,256,512])#.astype(float)
 
-log = []
-for v in var:
-    log0 = []
-    for ns in nss:
-        ims0 = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
-        ims1 = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
-        log0.append(1-(ims0[1]==ims1[1]).sum()/(1024**2))
-    log.append(log0)
-loss = np.block(log).squeeze()
+# log = []
+# for v in var:
+#     log0 = []
+#     for ns in nss:
+#         ims0 = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
+#         ims1 = fs.run_mf(ic, ea, nsteps=1, cut=0, cov=v, num_samples=ns, miso_array=ma, if_save=False)
+#         log0.append(1-(ims0[1]==ims1[1]).sum()/(1024**2))
+#     log.append(log0)
+# loss = np.block(log).squeeze()
+# np.save('./data/l0loss', loss)
+loss = np.load('./data/l0loss.npy')
 
-plt.figure(figsize=[2,2], dpi=300)
+plt.figure(figsize=[w,h], dpi=600)
 plt.rcParams['font.size'] = 8
-plt.plot(nss/v, loss, '*-')
+plt.plot(nss, loss, '*-')
 plt.ylabel('Mean $L0$ Loss')
-plt.xlabel('$N_S$/Variance')
-plt.ylim([0,.2])
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/l0loss_vs_nss.png', bbox_inches='tight', dpi=300)
+plt.xlabel('$N_S$')
+plt.ylim([0,.5])
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/l0loss_vs_nss.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
 
 ### Images vs nss #!!!
 nss = [3,8,16]
-log = []
-for ns in nss:
-    ims = fs.run_mf(ic, ea, nsteps=100, cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False)
-    ng = np.array([len(np.unique(im)) for im in ims])
-    i = np.argmin(np.abs(ng-1000))
-    log.append(ims[i,0])
+# log = []
+# for ns in nss:
+#     ims = fs.run_mf(ic, ea, nsteps=100, cut=0, cov=25, num_samples=ns, miso_array=ma, if_save=False)
+#     ng = np.array([len(np.unique(im)) for im in ims])
+#     i = np.argmin(np.abs(ng-1000))
+#     log.append(ims[i,0])
+# ims = np.stack(log)
+# np.save('./data/ims_vs_nss', ims)
+ims = np.load('./data/ims_vs_nss.npy')
     
 for i in range(len(nss)):    
-    plt.figure(figsize=[2,2], dpi=300)
+    plt.figure(figsize=[w,h], dpi=600)
     plt.rcParams['font.size'] = 8
-    plt.imshow(log[i])
+    plt.imshow(ims[i], interpolation='none')
     plt.title('$N_S$=%d'%nss[i])
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/structure_ns%d.png'%nss[i], bbox_inches='tight', dpi=300)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/structure_ns%d.png'%nss[i], bbox_inches='tight', dpi=600)
     plt.show()
 
 
 
 ### Distribution quality - statistical error vs nss #!!!
 
+var=25
+
 # Normalized radius
-nss = [2,3,4,8,16,32,64]
+nss = np.array([3,4,8,16,32,64,128])
 
 log = []
 log_h = []
@@ -613,9 +686,9 @@ for ns in nss:
     log_n0 = []
     for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
     
-        with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(%d)_cut(0).h5'%ns, 'r') as f:
+        with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(%d)_numnei(%d)_cut(0).h5'%(var,ns), 'r') as f:
             grain_areas = f['sim0/grain_areas'][:]
-            if ns==64: grain_areas = f['sim2/grain_areas'][:]
+            if ns==64 and var==25:  grain_areas = f['sim2/grain_areas'][:]
         n = (grain_areas!=0).sum(1)
         j = np.argmin(np.abs(n-num_grains))
         a = grain_areas[j]
@@ -670,9 +743,9 @@ for ns in nss:
     log_n0 = []
     for num_grains in [4000, 3000, 2000]: #4000, 3000, 2000
     
-        with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(%d)_cut(0).h5'%ns, 'r') as f:
+        with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(%d)_numnei(%d)_cut(0).h5'%(var, ns), 'r') as f:
             grain_sides = f['sim0/grain_sides'][:]
-            if ns==64: grain_sides = f['sim2/grain_sides'][:]
+            if ns==64 and var==25: grain_sides = f['sim2/grain_sides'][:]
         n = (grain_sides!=0).sum(1)
         i = np.argmin(np.abs(n-num_grains))
         s = grain_sides[i][grain_sides[i]!=0]
@@ -705,22 +778,30 @@ for ns in nss:
     
 rmse = np.block(log)
 
+# Plot rmse vs nss
+plt.figure(figsize=[w,h], dpi=600)
+plt.rcParams['font.size'] = 8
+plt.plot(nss, rmse_r.mean(1), '*-')
+plt.ylabel('RMSE - Normalized Radius')
+plt.xlabel('$N_S$')
+if if_leg: plt.legend(['Normalized Radius', 'Number of Sides'], fontsize=7)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/rmse_r_vs_nss.png', bbox_inches='tight', dpi=600)
+plt.show()
 
 # Plot rmse vs nss
-plt.figure(figsize=[2,2], dpi=300)
+plt.figure(figsize=[w,h], dpi=600)
 plt.rcParams['font.size'] = 8
-plt.plot(nss, rmse_r.mean(1), '-')
-plt.plot(nss, rmse.mean(1), '--')
-plt.ylabel('RMSE')
-plt.xlabel('Number of Samples')
-plt.legend(['Normalized Radius', 'Number of Sides'], fontsize=7)
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/rmse_vs_nss.png', bbox_inches='tight', dpi=300)
+plt.plot(nss, rmse.mean(1), '*-')
+plt.ylabel('RMSE - Number of Sides')
+plt.xlabel('$N_S$')
+if if_leg: plt.legend(['Normalized Radius', 'Number of Sides'], fontsize=7)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/rmse_sides_vs_nss.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
 # Plot r distributions
-for i in [1,3,4]:
-    plt.figure(figsize=[2,1], dpi=300)
+for i in [0,2,3]:
+    plt.figure(figsize=[2,1], dpi=600)
     plt.rcParams['font.size'] = 8
     plt.plot(x_mf_r, log_h_r[i][0], '-')
     plt.plot(x_yad_r, h_yad_r, '*', ms=5)
@@ -729,32 +810,34 @@ for i in [1,3,4]:
     plt.ylabel('Frequency')
     plt.xlim([0,3])
     plt.ylim([0,1.2])
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/r_dist_comp_ns%d.png'%nss[i], bbox_inches='tight', dpi=300)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/r_dist_comp_ns%d.png'%nss[i], bbox_inches='tight', dpi=600)
     plt.show()
    
    
 # Plot s distributions
-for i in [1,3,4]:
-    plt.figure(figsize=[2,1], dpi=300)
+for i in [0,2,3]:
+    plt.figure(figsize=[2,1], dpi=600)
     plt.rcParams['font.size'] = 8
     plt.plot(x_mf, log_h[i][0], '-')
     plt.plot(x_yad, h_yad, '*', ms=5)
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
-    plt.xlabel('Number of sides')
+    plt.xlabel('Number of Sides')
     plt.ylabel('Frequency')
     plt.xlim([0,15])
     plt.ylim([0,0.4])
-    plt.savefig('/blue/joel.harley/joseph.melville/tmp/s_dist_comp_ns%d.png'%nss[i], bbox_inches='tight', dpi=300)
+    plt.savefig('/blue/joel.harley/joseph.melville/tmp/s_dist_comp_ns%d.png'%nss[i], bbox_inches='tight', dpi=600)
     plt.show()
 
 
 
-### 2D MF run time vs ns (for iso and ani MF, include PF and SPPARKS) #!!!
+### 2D MF run time multiple vs ns (for iso and ani MF, include PF and SPPARKS) #!!!
 
 nss = [4,8,16,32,64]
 ng_bounds = [10000, 5000]
+ra_bounds = [225, 375]
+ra_bounds = [200, 400]
 
-def find_runtime(grains_areas, runtime_tot, ng_bounds):
+def find_runtime(grain_areas, runtime_tot, ng_bounds):
     ng = (grain_areas!=0).sum(1)
     si = np.argmin(np.abs(ng-ng_bounds[0]))
     sf = np.argmin(np.abs(ng-ng_bounds[1]))
@@ -763,16 +846,39 @@ def find_runtime(grains_areas, runtime_tot, ng_bounds):
     print('Runtime Total: %.2f, Start Step: %d, Stop Step: %d'%(runtime_tot, si, sf))
     return runtime
 
+def find_runtime2(grain_areas, d, runtime_tot, ra_bounds):
+    
+    if d==2: r = np.sqrt(grain_areas/np.pi) #for 2 dimensions
+    elif d==3: r = np.cbrt(grain_areas*3/4/np.pi) #for 3 dimensions
+    n = (r!=0).sum(1)
+    ra = r.sum(1)/n #find mean without zeros
+    ra2 = ra**2 #square after the mean
+    si = np.argmin(np.abs(ra2-ra_bounds[0]))
+    sf = np.argmin(np.abs(ra2-ra_bounds[1]))
+    nf = sf-si
+    runtime = runtime_tot*nf/len(n)
+    
+    plt.figure()
+    plt.plot(ra2)
+    plt.plot(si, ra2[si], '.')
+    plt.plot(sf, ra2[sf], '.')
+    plt.show()
+    
+    # print('Runtime Total: %.2f, Start Step: %d, Stop Step: %d'%(runtime_tot, si, sf))
+    return runtime
+
 mat = scipy.io.loadmat('./data/CSV.mat')
 grain_areas = mat['areas'].T[:300]
 runtime_tot = 40590
-runtime_pf = find_runtime(grain_areas, runtime_tot, ng_bounds)
+# runtime_pf = find_runtime(grain_areas, runtime_tot, ng_bounds)
+runtime_pf = find_runtime2(grain_areas, 2, runtime_tot, ra_bounds)
 
 
 with h5py.File('./data/spparks_sz(2400x2400)_ng(20000)_nsteps(1600)_freq(1.0)_kt(0.66)_cut(0).h5', 'r') as f:
     grain_areas = f['sim0/grain_areas'][:1000,]
 runtime_tot = 7776
-runtime_mcp = find_runtime(grain_areas, runtime_tot, ng_bounds)
+# runtime_mcp = find_runtime(grain_areas, runtime_tot, ng_bounds)
+runtime_mcp = find_runtime2(grain_areas, 2, runtime_tot, ra_bounds)
 
 
 # with h5py.File('./data/spparks_sz(2400x2400)_ng(20000)_nsteps(1600)_freq(1.0)_kt(0.66)_cut(0).h5', 'r') as f:
@@ -781,26 +887,66 @@ runtime_mcp = find_runtime(grain_areas, runtime_tot, ng_bounds)
 # ma = np.load('./data/miso_array_20000.npy')
 
 # log = []
-# for i in range(len(nss)):
-#     ims, runtime_tot = fs.run_mf(ic, ea, nsteps=200, cut=0, cov=25, num_samples=nss[i], miso_array=ma, if_time=True, if_save=False)
+# for ns in nss:
+#     ims, runtime_tot = fs.run_mf(ic, ea, 100, cut=0, cov=25, num_samples=ns, miso_array=ma, if_time=True, if_save=False)
 #     grain_areas = fs.iterate_function(ims, fs.find_grain_areas, [19999])
-#     log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     # log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     log.append(find_runtime2(grain_areas, 2, runtime_tot, ra_bounds))
 # runtime_mf_iso = np.stack(log)
+# # np.save('./data/runtime_mf_iso_var%d.npy'%covs[i], runtime_mf_iso)
 # np.save('./data/runtime_mf_iso.npy', runtime_mf_iso)
 runtime_mf_iso = np.load('./data/runtime_mf_iso.npy')
 
 # log = []
 # for ns in nss:
-#     ims, runtime_tot = fs.run_mf(ic, ea, nsteps=200, cut=25, cov=25, num_samples=ns, miso_array=ma, if_time=True, if_save=False)
+#     ims, runtime_tot = fs.run_mf(ic, ea, nsteps=100, cut=25, cov=25, num_samples=ns, miso_array=ma, if_time=True, if_save=False)
 #     grain_areas = fs.iterate_function(ims, fs.find_grain_areas, [19999])
-#     log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     # log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     log.append(find_runtime2(grain_areas, 2, runtime_tot, ra_bounds))
 # runtime_mf_ani = np.stack(log)
 # np.save('./data/runtime_mf_ani.npy', runtime_mf_ani)
 runtime_mf_ani = np.load('./data/runtime_mf_ani.npy')
 
 
+#Confirm the speed multiple is the same for sample density
+#I should probably do error bars for this, but I would need to have the exact same sample density (not today)
+# log0 = []
+# covs = [4,9,16,25,36] 
+# nsteps = [500, 200, 100, 100, 50]
+# for i in range(len(covs)):
+#     log = []
+#     for ns in nss:
+#         ims, runtime_tot = fs.run_mf(ic, ea, nsteps=nsteps[i], cut=0, cov=covs[i], num_samples=ns, miso_array=ma, if_time=True, if_save=False)
+#         a = fs.iterate_function(ims, fs.find_grain_areas, [19999])
+#         r = np.sqrt(a/np.pi)
+#         n = (r!=0).sum(1)
+#         ra = r.sum(1)/n #find mean without zeros
+#         ra2 = ra**2 #square after the mean
+        
+#         si = np.argmin(np.abs(ra2-ra_bounds[0]))
+#         sf = np.argmin(np.abs(ra2-ra_bounds[1]))
+#         nf = sf-si
+#         runtime = runtime_tot*nf/len(n)
+        
+#         print('Runtime Total: %.2f, Start Step: %d, Stop Step: %d'%(runtime_tot, si, sf))
+        
+        
+#         log.append(runtime)
+        
+#     log0.append(log)
+    
+
+# aaa = np.block(log0)
+
+# covs = [4,9,16,25,36] 
+# for i, var in enumerate(covs):
+#     plt.plot(np.array(nss)/var, runtime_mcp/aaa[i,])
+
+
 # 3D
 ng_bounds = [4000, 2000]
+ra_bounds = [9.3, 19.8]
+ra_bounds = [20, 30]
 
 # ic = np.load('./data/ic_128p3_8192.npy').astype(float)
 # ea = np.load('./data/ea_128p3_8192.npy')
@@ -810,7 +956,8 @@ ng_bounds = [4000, 2000]
 # for i in range(len(nss)):
 #     ims, runtime_tot = fs.run_mf(ic, ea, nsteps=60, cut=0, cov=4, num_samples=nss[i], miso_array=ma, if_time=True, if_save=False)
 #     grain_areas = fs.iterate_function(ims, fs.find_grain_areas, [8191])
-#     log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     # log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     log.append(find_runtime2(grain_areas, 3, runtime_tot, ra_bounds))
 # runtime_mf_iso_3D = np.stack(log)
 # np.save('./data/runtime_mf_iso_3D.npy', runtime_mf_iso_3D)
 runtime_mf_iso_3D = np.load('./data/runtime_mf_iso_3D.npy')
@@ -819,7 +966,8 @@ runtime_mf_iso_3D = np.load('./data/runtime_mf_iso_3D.npy')
 # for ns in nss:
 #     ims, runtime_tot = fs.run_mf(ic, ea, nsteps=60, cut=25, cov=4, num_samples=ns, miso_array=ma, if_time=True, if_save=False)
 #     grain_areas = fs.iterate_function(ims, fs.find_grain_areas, [8191])
-#     log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     # log.append(find_runtime(grain_areas, runtime_tot, ng_bounds))
+#     log.append(find_runtime2(grain_areas, 3, runtime_tot, ra_bounds))
 # runtime_mf_ani_3D = np.stack(log)
 # np.save('./data/runtime_mf_ani_3D.npy', runtime_mf_ani_3D)
 runtime_mf_ani_3D = np.load('./data/runtime_mf_ani_3D.npy')
@@ -827,7 +975,7 @@ runtime_mf_ani_3D = np.load('./data/runtime_mf_ani_3D.npy')
 
 grain_areas = np.load('./data/spparks_grain_areas_128p3_8192.npy')
 runtime_tot = 2720
-runtime_mcp_3D = find_runtime(grain_areas, runtime_tot, ng_bounds)
+runtime_mcp_3D = find_runtime2(grain_areas, 3, runtime_tot, ra_bounds)
 
 
 # Plot
@@ -836,16 +984,16 @@ ani_2D = runtime_mcp/runtime_mf_ani
 iso_3D = runtime_mcp_3D/runtime_mf_iso_3D
 ani_3D = runtime_mcp_3D/runtime_mf_ani_3D
 
-plt.figure(figsize=[3,2], dpi=300)
+plt.figure(figsize=[3,2], dpi=600)
 plt.rcParams['font.size'] = 8
 plt.plot(nss, np.log10(iso_2D), '*-', ms=5)
 plt.plot(nss, np.log10(ani_2D), '^-', ms=5)
 plt.plot(nss, np.log10(iso_3D), '*-.', ms=5)
 plt.plot(nss, np.log10(ani_3D), '^-.', ms=5)
-plt.xlabel('Number of samples')
-plt.ylabel('$Log_{10}$ times faster')
-plt.legend(['2D Isotropic','2D Anisotropic', '3D Isotropic', '3D Anisotropic'], fontsize=7)
-plt.savefig('/blue/joel.harley/joseph.melville/tmp/comp_speed.png', bbox_inches='tight', dpi=300)
+plt.xlabel('$N_S$')
+plt.ylabel('$Log_{10}$ Times Taster')
+plt.legend(['2D Iso','2D Ani', '3D Iso', '3D Ani'], fontsize=7)
+plt.savefig('/blue/joel.harley/joseph.melville/tmp/comp_speed.png', bbox_inches='tight', dpi=600)
 plt.show()
 
 
@@ -865,17 +1013,55 @@ shutil.make_archive('../tmp', 'zip', '../tmp')
 
 
 
-
 ### Apendix  #!!!
 
+import torch
 
-# with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
-#     ic = torch.from_numpy(f['sim2/ims_id'][0,0].astype(float))
-#     ea = torch.from_numpy(f['sim2/euler_angles'][:].astype(float))
-#     ma = torch.from_numpy(f['sim2/miso_array'][:].astype(float))
+with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(64)_cut(0).h5', 'r') as f:
+    ic = torch.from_numpy(f['sim2/ims_id'][0,0].astype(float))
+    ea = torch.from_numpy(f['sim2/euler_angles'][:].astype(float))
+    ma = torch.from_numpy(f['sim2/miso_array'][:].astype(float))
+
+
+#nss = [ 2,  3,  4,  8, 16, 32, 64, 128, 256, 512]
+#covs = [4, 9, 16, 25, 36]
+        
+
+nss = [ 2,  3,  4,  8, 16, 32, 64, 128]
+covs = [4]
+
+for ns in nss:
+    for var in covs:
+        print('Running: ns=%d, var=%d'%(ns, var))
+        ims, fp = fs.run_mf(ic, ea, nsteps=1500, cut=0, cov=var, num_samples=ns, miso_array=ma, if_save=True)
+        fs.compute_grain_stats(fp)
+        
+nss = [ 2,  3,  4,  8, 16, 32, 64, 128]
+covs = [9]
+
+for ns in nss:
+    for var in covs:
+        print('Running: ns=%d, var=%d'%(ns, var))
+        ims, fp = fs.run_mf(ic, ea, nsteps=1500, cut=0, cov=var, num_samples=ns, miso_array=ma, if_save=True)
+        fs.compute_grain_stats(fp)
+        
     
-# ims = fs.run_mf(ic, ea, nsteps=1000, cut=0, cov=25, num_samples=3, miso_array=ma, if_save=True)
-# fs.compute_grain_stats('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(25)_numnei(3)_cut(0).h5')
+nss = [ 2,  3,  4,  8, 16, 32, 64, 128]
+covs = [25]
+
+for ns in nss:
+    for var in covs:
+        print('Running: ns=%d, var=%d'%(ns, var))
+        ims, fp = fs.run_mf(ic, ea, nsteps=1000, cut=0, cov=var, num_samples=ns, miso_array=ma, if_save=True)
+        fs.compute_grain_stats(fp)
+
+
+
+
+with h5py.File('./data/mf_sz(2400x2400)_ng(20000)_nsteps(1000)_cov(16)_numnei(128)_cut(0).h5', 'r') as f:
+    im = torch.from_numpy(f['sim0/ims_id'][-1,0].astype(float))
+
+len(np.unique(im))
 
 
 # ### Percentage edge pixels at 1000 grains steps vs nss
