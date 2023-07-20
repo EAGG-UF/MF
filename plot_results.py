@@ -467,7 +467,8 @@ plt.rcParams['font.size'] = 8
 for i in range(len(num_grains)):
     plt.subplot(2, 4, 1+i)
     plt.imshow(ims_mf[i], interpolation='none')
-    plt.title('$N_G$=%d'%ng_mf[i], fontsize=8)
+    # plt.title('$N_G$=%d'%ng_mf[i], fontsize=8)
+    plt.title('$N_G$=%d'%num_grains[i], fontsize=8)
     plt.tick_params(bottom=False, left=False,labelleft=False, labelbottom=False)
     if i==0: plt.ylabel('MF', fontsize=8)
     plt.subplot(2, 4, 5+i)

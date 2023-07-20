@@ -112,7 +112,8 @@ def normal_mode_filter(im, miso_matrix=None, cut=0, cov=25, num_samples=64, bcs=
     e = np.prod(s)
     
     # Create covariance matrix
-    if type(cov)==int: cov=torch.eye(d)*cov
+    if type(cov)==int: cov = torch.eye(d)*cov
+    if type(cov)==list: cov = torch.Tensor(cov)
     
     # Set boundary conditions [x,y,z]
     if type(bcs)==str: bcs=[bcs]*d
@@ -175,7 +176,7 @@ def run_mf(ic, ea, nsteps, cut, cov=25, num_samples=64, miso_array=None, if_plot
     miso_matrix = miso_array_to_matrix(miso_array[None,]).to(device)[0]
     
     if type(cov)==int: cov_rep = cov
-    else: cov_rep = cov[0,0]
+    else: cov_rep = cov[0][0]
     sz_str = ''.join(['%dx'%i for i in ic.shape])[:-1]
     fp_save = './data/mf_sz(%s)_ng(%d)_nsteps(%d)_cov(%d)_numnei(%d)_cut(%d).h5'%(sz_str, ngrain, nsteps, cov_rep, num_samples, cut)
     
@@ -1488,6 +1489,76 @@ def trainset_cutNumFeatures(fp, window_size, cut_f):
             fn['euler_angles'] = f['euler_angles'][:]
             fn['miso_array'] = f['miso_array'][:]
             
+            
+def dump_to_hdf5(path_to_dump="Circle_512by512", path_to_hdf5="Circle_512by512", num_steps=None):
+    #A more general purpose extract dump file - reads lines directly to an hdf5 file and saves header names
+    #The lines can then be extracted one-by-one from the hdf5 file and converted to an image
+    #"num_steps" is a guess at how many entries there are in the dump file to report how long it will take
+    
+    with open(path_to_dump+".dump") as file:
+        bounds = np.zeros([3,2])
+        for i, line in enumerate(file): #extract the number of atoms, bounds, and variable names from the first few lines
+            if i==3: num_atoms = int(line) 
+            if i==5: bounds[0,:] = np.array(line.split(), dtype=float)
+            if i==6: bounds[1,:] = np.array(line.split(), dtype=float)
+            if i==7: bounds[2,:] = np.array(line.split(), dtype=float)
+            if i==8: var_names = line.split()[2:]
+            if i>8: break
+    bounds = np.ceil(bounds).astype(int) #reformat bounds
+    entry_length = num_atoms+9 #there are 9 header lines in each entry
+    
+    if num_steps!=None: total_lines = num_steps*entry_length
+    else: total_lines=None
+    
+    time_steps = []
+    with h5py.File(path_to_hdf5+".hdf5", 'w') as f:
+        f["bounds"] = bounds #metadata
+        f["variable_names"] = [x.encode() for x in var_names] #metadata
+        dset = f.create_dataset("dump_extract", shape=(1,num_atoms,len(var_names)), maxshape=(None,num_atoms,len(var_names)))#, chunks=True)
+        with open(path_to_dump+".dump") as file:
+            for i, line in tqdm(enumerate(file), "EXTRACTING SPPARKS DUMP (%s.dump)"%path_to_dump, total=total_lines):
+                [entry_num, line_num] = np.divmod(i,entry_length) #what entry number and entry line number does this line number indicate
+                if line_num==0: entry = np.zeros([num_atoms, len(var_names)]) #reset the entry values at the beginning of each entry
+                if line_num==1: time_steps.append(int(line.split()[-1])) #log the time step
+                atom_num = line_num-9 #track which atom line we're on
+                if atom_num>0 and atom_num<num_atoms: entry[atom_num,] = np.array(line.split(), dtype=float) #record valid atom lines
+                if line_num==entry_length-1: 
+                    dset[-1,:,:] = entry #save this entry before going to the next
+                    dset.resize(dset.shape[0]+1, axis=0) #make more room in the hdf5 dataset
+        dset.resize(dset.shape[0]-1, axis=0) #remove the extra room that wasn't used
+        time_steps = np.array(time_steps) #reformat time_steps
+        f["time_steps"] = time_steps #metadata
+        
+    return var_names, time_steps, bounds
+
+
+def dump_extract_to_images(path_to_hdf5="Hex_443by512", new_path="Hex_443by512_2", vi=1, xi=2, yi=3):
+    #Convert hdf5 dataset "dump_extract" to "images" in a new hdf5 file
+    #This function is intended to be used to process the raw extracted data from a SPPARKS dump (e.g. extract images)
+    #"vi" is the index in the third dimension of "f[("dump_extract")]" that corresponds to the image pixels 
+    #"xi" and "yi" are the indices in the third dimension of "f[("dump_extract")]" that correspond position of each pixel value
+
+    with h5py.File(path_to_hdf5+".hdf5", 'a') as f:
+        b = f[("bounds")]
+        e = f[("dump_extract")]
+        s = e.shape
+        ii = (e[0,:,xi]*b[1,1]+e[0,:,yi]).astype(int) #calculate indicies for remapping the pixels
+        
+        #Find the smallest data type that can be used without overflowing
+        m = np.max(e[0,:,vi])
+        tmp = np.array([8,16,32], dtype='uint64')
+        dtype = 'uint' + str(tmp[np.sum(m>2**tmp)])
+        
+        with h5py.File(new_path+".hdf5", 'w') as ff: #open new hdf5 to write to
+            ims = ff.create_dataset("images", shape=(tuple([s[0]])+tuple(b[0:2,1].tolist())), dtype=dtype)
+            
+            for i in tqdm(range(s[0]), "EXTRACT ID IMAGES FROM HDF5 FILE (%s.hdf5)"%path_to_hdf5):
+                ee = np.zeros([s[1]])
+                ee[ii] = e[i,:,vi]
+                ims[i,] = ee.reshape(b[0:2,1])
+        
+            plt.imshow(ims[0,]) #show the first image as a sample
+            
 
 
 
@@ -2613,7 +2684,7 @@ def find_im_indices(size=[64,64,64]):
     return cartesian_prod(xi)
 
 
-def find_ncombo(im, n=3):
+def find_ncombo(im, n=3, pad_mode='circular'):
     #n=2 returns all pairs that can be made between a center pixel ID and neighbors of different values
     #n=3 is the same, but find triplets composed of the center and two nieghbors that all have different IDs
     #'ncombo_diff': shape=(n+d, number of combinations)
@@ -2626,7 +2697,7 @@ def find_ncombo(im, n=3):
     nn = len(ni) #number of neighbors
     
     # Find all possible neighbor combinations
-    im_unfold = my_unfoldNd(im)[0,ni]
+    im_unfold = my_unfoldNd(im, pad_mode=pad_mode)[0,ni,]
     i = torch.combinations(torch.arange(nn), r=n-1, with_replacement=False).T.to(im.device) #find all combinations of neighbors that can make an N-combination with the center ID
     if n==3: i = i[:, i.sum(0)!=(nn-1)] #if finding junctions, remove cross combinations (top/bottom, left/right, in/out)
     i_center = find_im_indices(im.shape[2:]).to(im.device) #find the indicies at the center
@@ -2808,12 +2879,29 @@ def calc_dihedral_angles(junction_angles):
     return torch.stack([a0, a1, a2])
 
 
-def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
+def find_dihedral_angles(im, if_plot=False, num_plot_jct=10, pad_mode='circular'):
     #'im' - shape=(1,1,dim1,dim2), microstructureal image in which to find junction digedral angles
-    #output - shape=(6, number of junctions), first three numbers are the IDs that define the junction, the last three are the dihedral angles between ID indices 0/1, 1/2, and 0/2    
+    #output - shape=(6, number of junctions), first three numbers are the IDs that define the junction, the last three are the dihedral angles between edges 0/1 and 0/2, 0/2 and 1/2, and 0/1 and 1/2 (using ID indices)   
+    #Does not work for grains large enough to 
+    
+    # if pad_mode=='reflect': #only works for triple grain of 256x256
+    #     a1 = torch.zeros(1,1,256,2)-1
+    #     a2 = torch.zeros(1,1,256,2)-2
+    #     a3 = torch.zeros(1,1,2,260)-3
+    #     a4 = torch.zeros(1,1,2,260)-4
+    #     aaa = torch.cat([a1, im.cpu(), a2], dim=3)
+    #     bbb = torch.cat([a3, aaa, a4], dim=2)
+    #     im = bbb.to(im.device)
+        
+    if pad_mode=='reflect': #only works for triple grain of 256x256
+        im[:,:,:10] = -1
+        im[:,:,-10:] = -2
+        im[:,:,:,:10] = -3
+        im[:,:,:,-10:] = -4
+    
     
     # Find triplet indices and neighbors 
-    ncombo = find_ncombo(im, n=3) #find all indices included in a triplet
+    ncombo = find_ncombo(im, n=3, pad_mode='reflect') #find all indices included in a triplet
     ncombo_avg = find_ncombo_avg(ncombo, im.shape[2:]) #find the average location of those found in the same triplet
     adj = find_juntion_neighbors(ncombo_avg)  #find the neighbors for each triplet (share two of the same IDs)
     
@@ -3017,7 +3105,7 @@ def find_dihedral_angles(im, if_plot=False, num_plot_jct=10):
                 if num_plot_jct>num_junctions: 
                     jcts=np.arange(int(y.shape[0]/3))
                 else:
-                    jcts = np.sort(np.random.choice(np.arange(int(y.shape[1]/3)), num_plot_jct, replace=False))
+                    jcts = np.sort(np.random.choice(np.arange(int(y.shape[1]/3)), num_plot_jct, replace=True))
                 
                 for i in jcts:
                     plt.imshow(im[0,0].cpu())
