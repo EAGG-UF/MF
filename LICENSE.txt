@@ -9,5 +9,6 @@ GNU General Public License along with this program. If not, see
 <http://www.gnu.org/licenses/>.
 
 -------------------------------------------------------------------------
-IF THIS CODE IS USED FOR A RESEARCH PUBLICATION, please cite: 
+IF THIS CODE IS USED FOR A RESEARCH PUBLICATION, please cite:
+    Melville, J., Yadav, V., Yang, L., Krause, A. R., Tonks, M. R., & Harley, J. B. (2024). A new efficient grain growth model using a random Gaussian-sampled mode filter. Materials & Design, 237, 112604.
 -------------------------------------------------------------------------

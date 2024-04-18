@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Example code for mode filter grain growth model
-
-@author: joseph.melville
+IF THIS CODE IS USED FOR A RESEARCH PUBLICATION, please cite:
+    Melville, J., Yadav, V., Yang, L., Krause, A. R., Tonks, M. R., & Harley, J. B. (2024). A new efficient grain growth model using a random Gaussian-sampled mode filter. Materials & Design, 237, 112604.
 """
 
 import functions as fs

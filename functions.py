@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 IF THIS CODE IS USED FOR A RESEARCH PUBLICATION, please cite:
-    Yan, W., Melville, J., Yadav, V., Everett, K., Yang, L., Kesler, M. S., ... & Harley, J. B. (2022). A novel physics-regularized interpretable machine learning model for grain growth. Materials & Design, 222, 111032.
+    Melville, J., Yadav, V., Yang, L., Krause, A. R., Tonks, M. R., & Harley, J. B. (2024). A new efficient grain growth model using a random Gaussian-sampled mode filter. Materials & Design, 237, 112604.
 """
 
 ### Import functions
@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from unfoldNd import unfoldNd 
 import matplotlib.colors as mcolors
 import time
-# from uvw import RectilinearGrid, DataArray
+from uvw import RectilinearGrid, DataArray
 
 
 
@@ -156,7 +156,7 @@ def normal_mode_filter(im, miso_matrix=None, cut=0, cov=25, num_samples=64, bcs=
     return im_next
 
 
-def run_mf(ic, ea, nsteps, cut, cov=25, num_samples=64, miso_array=None, if_plot=False, if_save=True, if_time=False, bcs='p', memory_limit=1e9, device=device):
+def run_mf(ic, ea, nsteps, cut, cov=25, num_samples=64, miso_array=None, plt_freq=None, if_save=True, if_time=False, bcs='p', memory_limit=1e9, device=device):
     #run mode filter simulation
     
     # Setup
@@ -188,7 +188,10 @@ def run_mf(ic, ea, nsteps, cut, cov=25, num_samples=64, miso_array=None, if_plot
         im = normal_mode_filter(im, miso_matrix, cut, cov, num_samples, bcs, memory_limit=memory_limit)
         if if_time: log_t.append(time.time() - start_time)
         log.append(im.clone())
-        if if_plot: plt.imshow(im[0,0,].cpu()); plt.show()
+        # if if_plot: plt.imshow(im.cpu()); plt.show()
+        
+        if plt_freq is not None:
+            if i%plt_freq==0: plt.imshow(im.cpu()); plt.show()
     
     if if_time: runtime = np.sum(log_t)
     ims_id = torch.stack(log)[:,None,].cpu().numpy()
@@ -1809,12 +1812,12 @@ def plotly_micro(im):
     fig.show()
 
 
-# def create_3D_paraview_vtr(ims, fp='micro_grid.vtr'):
-#     #ims.shape = (d1, d2, d3), numpy
-#     cells_coords = [np.arange(s+1)-int(s/2) for s in ims.shape]
-#     grid = RectilinearGrid(fp, cells_coords, compression=True)
-#     grid.addCellData(DataArray(ims, range(3), 'grains'))
-#     grid.write()
+def create_3D_paraview_vtr(ims, fp='micro_grid.vtr'):
+    #ims.shape = (d1, d2, d3), numpy
+    cells_coords = [np.arange(s+1)-int(s/2) for s in ims.shape]
+    grid = RectilinearGrid(fp, cells_coords, compression=True)
+    grid.addCellData(DataArray(ims, range(3), 'grains'))
+    grid.write()
     
 
 def find_frame_num_grains(h5_group, num_grains=7500, min_pix=50):
@@ -2281,7 +2284,7 @@ def make_videos(hps, gps='last'):
             ims = g['ims_id'][:,0,j]
             ims = (255/np.max(ims)*ims).astype(np.uint8)
             imageio.mimsave('./plots/ims_id%d.mp4'%(i), ims)
-            # imageio.mimsave('./plots/ims_id%d.gif'%(i), ims)
+            imageio.mimsave('./plots/ims_id%d.gif'%(i), ims)
             
             # ims = g['ims_miso'][:,0,j]
             # ims = (255/np.max(ims)*ims).astype(np.uint8)
@@ -2894,10 +2897,12 @@ def find_dihedral_angles(im, if_plot=False, num_plot_jct=10, pad_mode='circular'
     #     im = bbb.to(im.device)
         
     if pad_mode=='reflect': #only works for triple grain of 256x256
-        im[:,:,:10] = -1
-        im[:,:,-10:] = -2
-        im[:,:,:,:10] = -3
-        im[:,:,:,-10:] = -4
+        ud = 20
+        lr = 120
+        im[:,:,:ud] = -1
+        im[:,:,-ud:] = -2
+        im[:,:,:,:lr] = -3
+        im[:,:,:,-lr:] = -4
     
     
     # Find triplet indices and neighbors 
